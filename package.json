@@ -1,0 +1,18 @@
+{
+  "name": "claude-harness-sync",
+  "version": "0.1.0",
+  "description": "Use your Claude Code setup (plugins, skills, agents, commands, MCP) from opencode and pi — via symlinks, without duplicating files",
+  "type": "module",
+  "main": "src/plugin.js",
+  "exports": { ".": "./src/plugin.js" },
+  "files": ["bin", "src", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "bash test/claude-harness-sync.test.sh",
+    "sync": "bash bin/claude-harness-sync.sh",
+    "report": "bash bin/claude-harness-sync.sh --report"
+  },
+  "keywords": ["claude-code", "opencode", "pi", "agent-skills", "mcp", "symlink", "sync"],
+  "license": "MIT",
+  "peerDependencies": { "@opencode-ai/plugin": ">=1.18.0" },
+  "peerDependenciesMeta": { "@opencode-ai/plugin": { "optional": true } }
+}

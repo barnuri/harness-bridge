@@ -33,7 +33,22 @@ export const ClaudeHarnessSync = async ({ $ }, options = {}) => {
     // intentionally silent; run the script by hand to see why
   }
 
-  return {}
+  return {
+    /**
+     * Give shared skills a real per-session id under opencode.
+     *
+     * opencode exports no session-id environment variable, so hooks/agent-env.sh in the
+     * skills repo otherwise falls back to `opencode-$OPENCODE_PID` — stable per *process*,
+     * which means two sequential sessions in one opencode process share a key. This hook
+     * receives the actual sessionID and, because a plugin runs in-process, assigning to
+     * process.env here propagates to every child the bash tool spawns afterwards.
+     *
+     * AGENT_SESSION_ID is the first link in that resolver's chain, so this simply wins.
+     */
+    "tool.execute.before": async (input) => {
+      if (input?.sessionID) process.env.AGENT_SESSION_ID = input.sessionID
+    },
+  }
 }
 
 export default ClaudeHarnessSync

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Make an existing Claude Code setup usable from the opencode and pi coding harnesses,
-# without ever duplicating a file.
+# Make an existing Claude Code setup usable from the opencode, pi, codex, and cursor
+# coding harnesses, without ever duplicating a file.
 #
 # THE RULE: the Claude Code setup is the source of truth. Anything the other harness
 # already discovers on its own is left completely alone — linking it again would give the
@@ -22,43 +22,51 @@
 #
 # So this script links, from the two Claude roots:
 #
-#   PLUGINS (Claude-only concept — the cache is invisible to both harnesses)
-#     <installPath>/skills/<name>/  ->  ~/.agents/skills/<name>        (opencode + pi)
+#   PLUGINS (Claude-only concept — the cache is invisible to every other harness)
+#     <installPath>/skills/<name>/  ->  ~/.agents/skills/<name>   (opencode + pi + codex + cursor)
 #     <installPath>/commands/*.md   ->  ~/.config/opencode/command/    (opencode)
 #     <installPath>/commands/*.md   ->  ~/.pi/agent/prompts/           (pi)
+#     <installPath>/commands/*.md   ->  ~/.cursor/commands/            (cursor)
+#     <installPath>/commands/*.md   ->  ~/.codex/prompts/              (codex — deprecated surface, still loaded)
 #     <installPath>/agents/*.md     ->  ~/.config/opencode/agent/      (opencode)
+#     <installPath>/agents/*.md     ->  ~/.cursor/agents/              (cursor — reads Claude agent markdown as-is)
 #
-#   COMPAT (plain Claude config that opencode does not scan)
-#     ~/.claude/agents/*.md    ->  ~/.config/opencode/agent/           (opencode)
-#     ~/.claude/commands/*.md  ->  ~/.config/opencode/command/         (opencode)
-#     ~/.claude/commands/*.md  ->  ~/.pi/agent/prompts/                (pi)
-#     <project>/.claude/agents/*.md    ->  <project>/.opencode/agent/
-#     <project>/.claude/commands/*.md  ->  <project>/.opencode/command/
+#   COMPAT (plain Claude config a harness does not scan by itself)
+#     ~/.claude/agents/*.md    ->  ~/.config/opencode/agent/           (opencode; cursor reads it natively)
+#     ~/.claude/commands/*.md  ->  ~/.config/opencode/command/ + ~/.pi/agent/prompts/
+#                                  + ~/.cursor/commands/ + ~/.codex/prompts/
+#     ~/.claude/CLAUDE.md      ->  ~/.pi/agent/AGENTS.md + ~/.codex/AGENTS.md
+#     <project>/.claude/agents/*.md    ->  <project>/.opencode/agent/  (cursor reads it natively)
+#     <project>/.claude/commands/*.md  ->  <project>/.opencode/command/ + .pi/prompts/ + .cursor/commands/
 #
-# Plugin skills target ~/.agents/skills/ rather than ~/.claude/skills/: it is the only
-# directory both harnesses scan, and Claude Code does *not* scan it — linking into
+# Plugin skills target ~/.agents/skills/ rather than ~/.claude/skills/: it is the one
+# directory all four harnesses scan, and Claude Code does *not* scan it — linking into
 # ~/.claude/skills/ would both modify the Claude setup and make every plugin skill appear
 # twice in Claude Code's own list. Plain ~/.claude/skills is already auto-detected by
-# opencode, so it is deliberately NOT linked anywhere for opencode.
+# opencode and cursor, so it is deliberately NOT linked anywhere for them.
 #
-# Symlinked skill directories are followed by both harnesses (verified against
-# `opencode debug skill` and pi's own loadSkillsFromDir).
+# Symlinked skill directories are followed by opencode (verified via `opencode debug
+# skill`), pi (loadSkillsFromDir), and codex (documented). cursor's IDE follows them from
+# 2.5; cursor-agent (CLI) has a known partial gap for link TARGETS outside .cursor/.claude
+# — reported as a caveat on every run rather than worked around by duplicating links.
 #
 # NOT LINKABLE (reported with the reason on every run):
-#   - MCP servers: Claude's {command, args, env} and opencode's {type, command[],
-#     environment} are different shapes, and the servers must live inside opencode.jsonc
-#     rather than a file of their own — so there is nothing for a symlink to point at, and
-#     this is the one place a shim is unavoidable. All four Claude sources are scanned:
+#   - MCP servers: they must live inside each harness's own config file, so there is
+#     nothing for a symlink to point at. All four Claude sources are scanned:
 #     ~/.claude.json, ~/.claude/settings.json, <project>/.mcp.json, <project>/.claude/
-#     settings.json. `--mcp-snippet` prints the translation; `--write-mcp` merges it into
-#     opencode.jsonc, regenerating those entries from Claude on every run so the Claude
-#     config stays the single source of truth. pi has no MCP support at all.
-#   - Hooks / permissions in settings.json: no equivalent concept in opencode or pi.
+#     settings.json. Per harness: opencode needs a schema translation ({type, command[],
+#     environment}) merged into opencode.jsonc (`--write-mcp`); cursor's mcp.json uses
+#     Claude's own {command, args, env} shape, so `--write-mcp` merges it near-verbatim;
+#     codex is TOML (config.toml) which is never machine-edited — `--mcp-snippet` prints
+#     the [mcp_servers.*] block to paste. pi has no MCP support at all. Written entries
+#     are regenerated from Claude on every run so Claude stays the single source of truth.
+#   - Hooks / permissions in settings.json: no equivalent concept in any harness.
 #   - Plugin hooks: opencode uses JS plugin handlers, pi uses TS extensions.
-#   - Subagents for pi: pi has no subagent concept.
+#   - Subagents for pi (no subagent concept) and codex (TOML agents, different schema).
+#   - Cursor user rules: settings UI only, no file to link.
 #
 # Usage:
-#   bin/claude-harness-sync.sh [--dry-run] [--no-prune] [--target all|opencode|pi]
+#   bin/claude-harness-sync.sh [--dry-run] [--no-prune] [--target all|opencode|pi|codex|cursor]
 #                                 [--project DIR | --no-project] [--mcp-snippet] [--write-mcp]
 #
 # Safe by default: a plain run links what is missing and prunes only the stale links it
@@ -71,6 +79,8 @@
 #   AGENTS_SKILLS_DIR    default $HOME/.agents/skills
 #   OPENCODE_CONFIG_DIR  default $HOME/.config/opencode
 #   PI_AGENT_DIR         default $HOME/.pi/agent
+#   CODEX_HOME_DIR       default $HOME/.codex
+#   CURSOR_CONFIG_DIR    default $HOME/.cursor
 
 set -u
 
@@ -80,6 +90,8 @@ installed_json="$plugins_dir/installed_plugins.json"
 agents_skills_dir="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 opencode_dir="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 pi_dir="${PI_AGENT_DIR:-$HOME/.pi/agent}"
+codex_dir="${CODEX_HOME_DIR:-$HOME/.codex}"
+cursor_dir="${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
 
 dry_run=0
 prune=1
@@ -92,29 +104,34 @@ report=0
 
 usage() {
   cat <<'USAGE'
-Make an existing Claude Code setup usable from opencode and pi, using symlinks only.
-The Claude Code setup is the source of truth and is never modified.
+Make an existing Claude Code setup usable from opencode, pi, codex, and cursor, using
+symlinks only. The Claude Code setup is the source of truth and is never modified.
 
-  bin/claude-harness-sync.sh [--dry-run] [--no-prune] [--target all|opencode|pi]
+  bin/claude-harness-sync.sh [--dry-run] [--no-prune] [--target all|opencode|pi|codex|cursor]
                                 [--project DIR | --no-project] [--mcp-snippet] [--write-mcp]
 
-Already auto-detected by opencode, so deliberately NOT linked:
-  ~/.claude/skills/   .claude/skills/   ~/.claude/CLAUDE.md   ./CLAUDE.md
+Already auto-detected by a harness, so deliberately NOT linked:
+  ~/.claude/skills/ + .claude/skills/  (opencode, cursor)
+  ~/.claude/CLAUDE.md + ./CLAUDE.md    (opencode; cursor CLI reads the project one)
+  ~/.claude/agents/ + .claude/agents/  (cursor)
 
-Linked, because opencode does not scan them:
+Linked, because the harness does not scan them:
+  plugin skills                 ->  ~/.agents/skills/   (opencode + pi + codex + cursor)
   ~/.claude/agents/*.md         ->  ~/.config/opencode/agent/
-  ~/.claude/commands/*.md       ->  ~/.config/opencode/command/  + ~/.pi/agent/prompts/
+  ~/.claude/commands/*.md       ->  ~/.config/opencode/command/ + ~/.pi/agent/prompts/
+                                    + ~/.cursor/commands/ + ~/.codex/prompts/
+  ~/.claude/CLAUDE.md           ->  ~/.pi/agent/AGENTS.md + ~/.codex/AGENTS.md
+  plugin agents/*.md            ->  ~/.config/opencode/agent/ + ~/.cursor/agents/
   <project>/.claude/agents/*.md ->  <project>/.opencode/agent/
-  <project>/.claude/commands/*.md -> <project>/.opencode/command/
-  plugin skills/commands/agents ->  ~/.agents/skills/, opencode, pi (cache is Claude-only)
+  <project>/.claude/commands/*.md -> <project>/.opencode/command/ + .pi/prompts/ + .cursor/commands/
 
   --dry-run       print the planned links and prunes, change nothing
   --no-prune      keep stale links instead of removing them
-  --target        restrict command/agent destinations (default: all)
+  --target        restrict destinations to one harness (default: all)
   --project DIR   also link that project's .claude/ (default: cwd when it has one)
   --no-project    skip project-level linking entirely
-  --mcp-snippet   print an opencode-shaped mcp block for Claude's MCP servers
-  --write-mcp     merge that block into opencode.jsonc (the only way opencode can use it)
+  --mcp-snippet   print per-harness MCP blocks (opencode jsonc, cursor mcp.json, codex TOML)
+  --write-mcp     merge MCP servers into opencode.jsonc + cursor mcp.json (codex: snippet only)
   --report        compare Claude's own inventory against what each harness loads, then exit
   -h, --help      this message
 
@@ -266,7 +283,7 @@ while [ $# -gt 0 ]; do
     --no-prune) prune=0 ;;
     --prune) prune=1 ;;
     --target)
-      [ $# -ge 2 ] || die "--target needs a value (all|opencode|pi)"
+      [ $# -ge 2 ] || die "--target needs a value (all|opencode|pi|codex|cursor)"
       target="$2"
       shift
       ;;
@@ -288,8 +305,8 @@ while [ $# -gt 0 ]; do
 done
 
 case "$target" in
-  all | opencode | pi) ;;
-  *) die "--target must be one of: all, opencode, pi (got '$target')" ;;
+  all | opencode | pi | codex | cursor) ;;
+  *) die "--target must be one of: all, opencode, pi, codex, cursor (got '$target')" ;;
 esac
 
 command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
@@ -312,10 +329,14 @@ fi
 
 want_opencode=0
 want_pi=0
+want_codex=0
+want_cursor=0
 case "$target" in
-  all) want_opencode=1; want_pi=1 ;;
+  all) want_opencode=1; want_pi=1; want_codex=1; want_cursor=1 ;;
   opencode) want_opencode=1 ;;
   pi) want_pi=1 ;;
+  codex) want_codex=1 ;;
+  cursor) want_cursor=1 ;;
 esac
 
 # Plan lines: <kind>\t<src>\t<dst>. Built first, applied second; dst_file holds the same
@@ -490,8 +511,13 @@ agent_needs_shim() {
 # and ./CLAUDE.md. opencode already discovers all four, so linking them would produce a
 # second entry for one resource.
 plan_compat_tree() {
-  local owner="$1" root="$2" oc_agent_dir="$3" oc_cmd_dir="$4" pi_prompt_dir="$5" f
+  local owner="$1" root="$2" oc_agent_dir="$3" oc_cmd_dir="$4" pi_prompt_dir="$5"
+  local cursor_cmd_dir="${6:-}" codex_prompt_dir="${7:-}" f
 
+  # Agents from plain Claude config go to opencode only. Cursor scans ~/.claude/agents and
+  # <project>/.claude/agents natively (documented compat dirs), so linking them for cursor
+  # would show every agent twice; codex agents are TOML with a different schema, so a
+  # symlink cannot serve them at all (reported in the not-migrated section).
   if [ "$want_opencode" -eq 1 ]; then
     for f in "$root"/agents/*.md; do
       [ -f "$f" ] || continue
@@ -508,23 +534,40 @@ plan_compat_tree() {
     [ "$want_opencode" -eq 1 ] && plan_link command "$owner" "$f" "$oc_cmd_dir" "$(basename "$f")"
     [ "$want_pi" -eq 1 ] && [ -n "$pi_prompt_dir" ] &&
       plan_link prompt "$owner" "$f" "$pi_prompt_dir" "$(basename "$f")"
+    [ "$want_cursor" -eq 1 ] && [ -n "$cursor_cmd_dir" ] &&
+      plan_link cursor-command "$owner" "$f" "$cursor_cmd_dir" "$(basename "$f")"
+    # codex custom prompts are global-only (~/.codex/prompts), so the project call site
+    # passes an empty dir here. Deprecated by codex in favor of skills, but still loaded.
+    [ "$want_codex" -eq 1 ] && [ -n "$codex_prompt_dir" ] &&
+      plan_link codex-prompt "$owner" "$f" "$codex_prompt_dir" "$(basename "$f")"
   done
 }
 
 plan_compat_tree "claude-user" "$claude_home" \
-  "$opencode_dir/agent" "$opencode_dir/command" "$pi_dir/prompts"
+  "$opencode_dir/agent" "$opencode_dir/command" "$pi_dir/prompts" \
+  "$cursor_dir/commands" "$codex_dir/prompts"
 
 # The global CLAUDE.md: opencode reads ~/.claude/CLAUDE.md directly, so it needs nothing.
 # pi does not — it loads ~/.pi/agent/AGENTS.md — so that one file is a real gap, and a
-# symlink closes it with no copy.
+# symlink closes it with no copy. codex has the same gap: its global instructions live at
+# ~/.codex/AGENTS.md and CLAUDE.md is not read natively (project-level CLAUDE.md can be
+# opted into via project_doc_fallback_filenames in config.toml — a config change, not a
+# link, so it is only reported). Cursor has no global instructions FILE at all (user rules
+# live in the settings UI), and its CLI reads the project-root CLAUDE.md by itself.
 if [ "$want_pi" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
   plan_link instructions "claude-user" "$claude_home/CLAUDE.md" "$pi_dir" "AGENTS.md"
 fi
+if [ "$want_codex" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
+  plan_link instructions "claude-user" "$claude_home/CLAUDE.md" "$codex_dir" "AGENTS.md"
+fi
 
 if [ -n "$project_root" ]; then
-  # Project scope stays inside the project: opencode reads .opencode/, pi reads .pi/.
+  # Project scope stays inside the project: opencode reads .opencode/, pi reads .pi/,
+  # cursor reads .cursor/. codex gets nothing here — its prompts are global-only and its
+  # project agents are TOML.
   plan_compat_tree "claude-project" "$project_root/.claude" \
-    "$project_root/.opencode/agent" "$project_root/.opencode/command" "$project_root/.pi/prompts"
+    "$project_root/.opencode/agent" "$project_root/.opencode/command" "$project_root/.pi/prompts" \
+    "$project_root/.cursor/commands" ""
 fi
 
 # A marketplace can be a local directory rather than a git checkout. Claude then reads
@@ -628,22 +671,30 @@ SKILLDIRS
       [ -f "$cmd" ] || continue
       [ "$want_opencode" -eq 1 ] && plan_link command "$plugin" "$cmd" "$opencode_dir/command" "$(basename "$cmd")"
       [ "$want_pi" -eq 1 ] && plan_link prompt "$plugin" "$cmd" "$pi_dir/prompts" "$(basename "$cmd")"
+      [ "$want_cursor" -eq 1 ] && plan_link cursor-command "$plugin" "$cmd" "$cursor_dir/commands" "$(basename "$cmd")"
+      [ "$want_codex" -eq 1 ] && plan_link codex-prompt "$plugin" "$cmd" "$codex_dir/prompts" "$(basename "$cmd")"
     done
   done <<CMDDIRS
 $(component_dirs "$install_path" commands)
 CMDDIRS
 
-  # pi has no subagent concept, so agents are an opencode-only destination.
-  if [ "$want_opencode" -eq 1 ]; then
+  # pi has no subagent concept and codex agents are TOML (different schema) — so plugin
+  # agents go to opencode (shimmed when the frontmatter needs it) and to cursor, which
+  # accepts Claude-format agent markdown as-is (it reads .claude/agents natively; the
+  # plugin cache is the one agents dir it cannot see).
+  if [ "$want_opencode" -eq 1 ] || [ "$want_cursor" -eq 1 ]; then
     while IFS= read -r ag_root; do
       [ -d "$ag_root" ] || continue
       for agent in "$ag_root"/*.md; do
         [ -f "$agent" ] || continue
-        if agent_needs_shim "$agent"; then
-          plan_link agent-shim "$plugin" "$agent" "$opencode_dir/agent" "$(basename "$agent")"
-        else
-          plan_link agent "$plugin" "$agent" "$opencode_dir/agent" "$(basename "$agent")"
+        if [ "$want_opencode" -eq 1 ]; then
+          if agent_needs_shim "$agent"; then
+            plan_link agent-shim "$plugin" "$agent" "$opencode_dir/agent" "$(basename "$agent")"
+          else
+            plan_link agent "$plugin" "$agent" "$opencode_dir/agent" "$(basename "$agent")"
+          fi
         fi
+        [ "$want_cursor" -eq 1 ] && plan_link cursor-agent "$plugin" "$agent" "$cursor_dir/agents" "$(basename "$agent")"
       done
     done <<AGENTDIRS
 $(component_dirs "$install_path" agents)
@@ -777,12 +828,18 @@ if [ "$prune" -eq 1 ]; then
     prune_dir "$opencode_dir/agent"
   fi
   [ "$want_pi" -eq 1 ] && prune_dir "$pi_dir/prompts"
+  if [ "$want_cursor" -eq 1 ]; then
+    prune_dir "$cursor_dir/commands"
+    prune_dir "$cursor_dir/agents"
+  fi
+  [ "$want_codex" -eq 1 ] && prune_dir "$codex_dir/prompts"
   if [ -n "$project_root" ]; then
     if [ "$want_opencode" -eq 1 ]; then
       prune_dir "$project_root/.opencode/agent"
       prune_dir "$project_root/.opencode/command"
     fi
     [ "$want_pi" -eq 1 ] && prune_dir "$project_root/.pi/prompts"
+    [ "$want_cursor" -eq 1 ] && prune_dir "$project_root/.cursor/commands"
   fi
 fi
 
@@ -791,13 +848,14 @@ count_kind() { grep -c "^$1	" "$plan_file" 2>/dev/null | tr -d ' '; }
 
 echo
 [ "$dry_run" -eq 1 ] && echo "DRY RUN — nothing was changed"
-printf 'planned: %s skills, %s opencode commands, %s pi prompts, %s opencode agents\n' \
-  "$(count_kind skill)" "$(count_kind command)" "$(count_kind prompt)" "$(count_kind agent)"
+printf 'planned: %s skills, %s opencode commands, %s pi prompts, %s opencode agents, %s cursor commands, %s cursor agents, %s codex prompts\n' \
+  "$(count_kind skill)" "$(count_kind command)" "$(count_kind prompt)" "$(count_kind agent)" \
+  "$(count_kind cursor-command)" "$(count_kind cursor-agent)" "$(count_kind codex-prompt)"
 verb="applied"
 [ "$dry_run" -eq 1 ] && verb="would apply"
 printf '%s: %s linked, %s shimmed, %s already current, %s stale entries pruned, %s plugin entries skipped\n' \
   "$verb" "$linked" "$shimmed" "$unchanged" "$pruned" "$skipped_plugins"
-printf 'targets: skills -> %s (opencode + pi)\n' "$agents_skills_dir"
+printf 'targets: skills -> %s (opencode + pi + codex + cursor all scan it)\n' "$agents_skills_dir"
 
 [ -n "$shims" ] && printf '\ncompatibility shims (symlink impossible — opencode hard-fails on Claude'"'"'s YAML list\nform for agent tools, so these are regenerated from the Claude source on every run):%s\n' "$shims"
 [ -n "$shadowed" ] && printf '\nnot linked — opencode already sees an equally-named skill in ~/.claude/skills,\nso linking the plugin copy would duplicate it:%s\n' "$shadowed"
@@ -814,20 +872,30 @@ report_auto() {
 }
 
 echo
-echo "detected automatically by opencode (left untouched):"
-report_auto "~/.claude/skills/" "$claude_home/skills"
-report_auto "~/.claude/CLAUDE.md" "$claude_home/CLAUDE.md"
+echo "detected automatically by a harness (left untouched):"
+report_auto "~/.claude/skills/ (opencode, cursor)" "$claude_home/skills"
+report_auto "~/.claude/CLAUDE.md (opencode)" "$claude_home/CLAUDE.md"
+report_auto "~/.claude/agents/ (cursor)" "$claude_home/agents"
 if [ -n "$project_root" ]; then
-  report_auto "<project>/.claude/skills/" "$project_root/.claude/skills"
-  report_auto "<project>/CLAUDE.md" "$project_root/CLAUDE.md"
+  report_auto "<project>/.claude/skills/ (opencode, cursor)" "$project_root/.claude/skills"
+  report_auto "<project>/CLAUDE.md (opencode, cursor CLI)" "$project_root/CLAUDE.md"
+  report_auto "<project>/.claude/agents/ (cursor)" "$project_root/.claude/agents"
 fi
 
 echo
-echo "not migrated (no equivalent in opencode/pi):"
-[ -n "$hook_plugins" ] && echo "  hooks:$hook_plugins — opencode uses JS plugin handlers, pi uses TS extensions"
-[ -n "$mcp_plugins" ] && echo "  .mcp.json servers:$mcp_plugins — schema differs, see --mcp-snippet; pi has no MCP support"
-echo "  subagents are opencode-only — pi has no subagent concept"
-echo "  settings.json hooks/permissions — no equivalent concept in either harness"
+echo "not migrated (no linkable equivalent):"
+[ -n "$hook_plugins" ] && echo "  hooks:$hook_plugins — opencode uses JS plugin handlers, pi uses TS extensions; codex/cursor have no plugin-hook concept"
+[ -n "$mcp_plugins" ] && echo "  .mcp.json servers:$mcp_plugins — see --mcp-snippet / --write-mcp; pi has no MCP support"
+echo "  subagents for pi (no subagent concept) and codex (TOML agents with a different schema — a symlink cannot convert them)"
+echo "  cursor user rules — settings UI only, no file to link"
+echo "  codex project-level CLAUDE.md — opt in via project_doc_fallback_filenames in ~/.codex/config.toml (a config change, not a link)"
+echo "  settings.json hooks/permissions — no equivalent concept in any harness"
+if [ "$want_cursor" -eq 1 ]; then
+  echo
+  echo "cursor caveat: cursor-agent (CLI) has a known partial symlink-discovery bug — links whose"
+  echo "  TARGETS live outside .cursor/ or .claude/ (e.g. a directory-source marketplace checkout)"
+  echo "  may be missed by the CLI while the IDE (2.5+) sees them. Verify with cursor-agent once."
+fi
 
 # --- MCP: the one thing a symlink genuinely cannot do -----------------------------------
 # Claude's {command, args, env} and opencode's {type, command[], environment} are different
@@ -895,9 +963,10 @@ MCP_TRANSLATE='to_entries
   | from_entries'
 
 mcp_translated=""
+mcp_merged=""
 if [ -n "$mcp_sources" ]; then
   echo
-  echo "MCP servers found in Claude config (cannot be symlinked — schema differs):"
+  echo "MCP servers found in Claude config (cannot be symlinked — lives inside each harness's config):"
   mcp_merged='{}'
   while IFS="	" read -r src root; do
     [ -n "$src" ] || continue
@@ -914,11 +983,67 @@ EOF
       "$opencode_dir/opencode.jsonc" 2>/dev/null || echo "(unreadable)")"
 fi
 
+# Claude's {command, args, env} -> codex's TOML [mcp_servers.<name>] tables. Printed only:
+# config.toml routinely carries user comments and jq cannot round-trip TOML, so a machine
+# merge would risk destroying the user's file. The shapes map 1:1 (env -> env_vars).
+MCP_TO_CODEX_TOML='to_entries[]
+  | "[mcp_servers.\(.key)]\n"
+    + (if .value.command then
+        "command = \(.value.command | @json)\n"
+        + "args = \(.value.args // [] | @json)\n"
+        + (if (.value.env // {} | length) > 0 then
+            "env_vars = { " + (.value.env | to_entries | map("\(.key) = \(.value | @json)") | join(", ")) + " }\n"
+          else "" end)
+      else
+        "url = \(.value.url // "" | @json)\n"
+      end)'
+
 if [ -n "$mcp_translated" ] && [ "$mcp_snippet" -eq 1 ]; then
-  echo
-  echo "paste into $opencode_dir/opencode.jsonc (printed only — nothing written):"
-  printf '%s\n' "$mcp_translated" | jq '{mcp: .}'
+  if [ "$want_opencode" -eq 1 ]; then
+    echo
+    echo "paste into $opencode_dir/opencode.jsonc (printed only — nothing written):"
+    printf '%s\n' "$mcp_translated" | jq '{mcp: .}'
+  fi
+  if [ "$want_cursor" -eq 1 ]; then
+    echo
+    echo "paste into $cursor_dir/mcp.json (printed only — cursor's schema matches Claude's):"
+    printf '%s\n' "$mcp_merged" | jq '{mcpServers: .}'
+  fi
+  if [ "$want_codex" -eq 1 ]; then
+    echo
+    echo "paste into $codex_dir/config.toml (printed only — TOML is never machine-edited):"
+    printf '%s\n' "$mcp_merged" | jq -r "$MCP_TO_CODEX_TOML"
+  fi
 elif [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
+  # Cursor's mcp.json uses Claude's own {command, args, env} shape under mcpServers, so the
+  # merged Claude set is written near-verbatim — regenerated from Claude config on every
+  # run, same single-source-of-truth rule as the opencode merge below.
+  if [ "$want_cursor" -eq 1 ]; then
+    cursor_mcp="$cursor_dir/mcp.json"
+    if [ "$dry_run" -eq 1 ]; then
+      echo "  would merge $(printf '%s' "$mcp_merged" | jq -r 'keys | length') server(s) into $cursor_mcp"
+    elif [ -s "$cursor_mcp" ] && ! jq -e . "$cursor_mcp" >/dev/null 2>&1; then
+      echo "  $cursor_mcp is not valid JSON — not rewriting it. Use --mcp-snippet and paste by hand."
+    else
+      mkdir -p "$cursor_dir"
+      tmp_cursor="$cursor_mcp.tmp.$$"
+      if jq --argjson add "$mcp_merged" '. + {mcpServers: ((.mcpServers // {}) + $add)}' \
+           "$cursor_mcp" 2>/dev/null >"$tmp_cursor" ||
+         printf '%s' '{}' | jq --argjson add "$mcp_merged" '{mcpServers: $add}' >"$tmp_cursor" 2>/dev/null; then
+        mv -f "$tmp_cursor" "$cursor_mcp"
+        echo "  merged $(printf '%s' "$mcp_merged" | jq -r 'keys | length') server(s) into $cursor_mcp"
+      else
+        rm -f "$tmp_cursor" 2>/dev/null
+        echo "  could not write $cursor_mcp — use --mcp-snippet and paste by hand"
+      fi
+    fi
+  fi
+  if [ "$want_codex" -eq 1 ]; then
+    echo "  codex: config.toml is never machine-edited (TOML, may carry comments) — run --mcp-snippet and paste the [mcp_servers.*] block"
+  fi
+  [ "$want_opencode" -eq 1 ] || mcp_translated=""
+fi
+if [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
   oc_config="$opencode_dir/opencode.jsonc"
   if [ "$dry_run" -eq 1 ]; then
     echo "  would merge $(printf '%s' "$mcp_translated" | jq -r 'keys | length') server(s) into $oc_config"
@@ -942,8 +1067,9 @@ elif [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
       echo "  could not write $oc_config — re-run with --mcp-snippet and paste by hand"
     fi
   fi
-elif [ -n "$mcp_translated" ]; then
-  echo "  --mcp-snippet prints a translated block; --write-mcp merges it into opencode.jsonc"
+elif [ -n "$mcp_translated" ] && [ "$mcp_snippet" -eq 0 ]; then
+  echo "  --mcp-snippet prints per-harness blocks (opencode jsonc, cursor mcp.json, codex TOML);"
+  echo "  --write-mcp merges into opencode.jsonc and cursor mcp.json (codex stays snippet-only)"
 fi
 
 exit 0

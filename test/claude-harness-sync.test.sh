@@ -488,8 +488,10 @@ mv "$h/.claude/commands/temporary.md" "$h/removed.md"
 out=$(run_sync "$h")
 assert_missing "case18: pruned once the source is gone" "$h/.config/opencode/command/temporary.md"
 assert_missing "case18: pi prompt pruned too" "$h/.pi/agent/prompts/temporary.md"
-# One command produced two links (opencode + pi), so both are pruned.
-assert_contains "case18: prune reported" "2 stale entries pruned" "$out"
+assert_missing "case18: cursor command pruned too" "$h/.cursor/commands/temporary.md"
+assert_missing "case18: codex prompt pruned too" "$h/.codex/prompts/temporary.md"
+# One command produced four links (opencode + pi + cursor + codex), so all four are pruned.
+assert_contains "case18: prune reported" "4 stale entries pruned" "$out"
 
 # --- Case 19: --mcp-snippet translates Claude's schema and writes nothing.
 h=$(new_home)
@@ -632,6 +634,86 @@ printf -- '---\nname: inline\ndescription: d\ntools: [Bash, Read]\n---\nb\n' >"$
 run_sync "$h" >/dev/null
 assert_contains "case23: inline list translated" "  Bash: true" "$(cat "$h/.config/opencode/agent/inline.md")"
 assert_contains "case23: second inline entry translated" "  Read: true" "$(cat "$h/.config/opencode/agent/inline.md")"
+
+# --- Case 24: a user command reaches cursor and codex alongside opencode and pi.
+h=$(new_home)
+add_user_command "$h/.claude" everywhere
+write_manifest "$h"
+run_sync "$h" >/dev/null
+assert_link_to "case24: cursor command linked" \
+  "$h/.cursor/commands/everywhere.md" "$h/.claude/commands/everywhere.md"
+assert_link_to "case24: codex prompt linked" \
+  "$h/.codex/prompts/everywhere.md" "$h/.claude/commands/everywhere.md"
+
+# --- Case 25: global CLAUDE.md reaches codex as AGENTS.md; a real file there is never touched.
+h=$(new_home)
+printf 'my global instructions\n' >"$h/.claude/CLAUDE.md"
+write_manifest "$h"
+run_sync "$h" >/dev/null
+assert_link_to "case25: codex AGENTS.md linked from CLAUDE.md" \
+  "$h/.codex/AGENTS.md" "$h/.claude/CLAUDE.md"
+h=$(new_home)
+printf 'my global instructions\n' >"$h/.claude/CLAUDE.md"
+mkdir -p "$h/.codex"
+printf 'hand-written codex instructions\n' >"$h/.codex/AGENTS.md"
+write_manifest "$h"
+out=$(run_sync "$h")
+assert_eq "case25: pre-existing real AGENTS.md untouched" \
+  "hand-written codex instructions" "$(cat "$h/.codex/AGENTS.md")"
+assert_contains "case25: conflict reported" "left alone" "$out"
+
+# --- Case 26: plugin agents reach cursor as plain symlinks (raw Claude markdown), even
+# when the same agent needs a rewritten shim for opencode.
+h=$(new_home)
+p=$(add_plugin "$h" mp toolkit 1.0.0)
+mkdir -p "$p/agents"
+printf -- '---\nname: helper\ndescription: d\ntools:\n  - Bash\n---\nbody\n' >"$p/agents/helper.md"
+write_manifest "$h" "toolkit@mp" "$p"
+run_sync "$h" >/dev/null
+assert_link_to "case26: cursor agent is a plain symlink to the raw file" \
+  "$h/.cursor/agents/helper.md" "$p/agents/helper.md"
+assert_contains "case26: opencode copy is the shim" "Bash: true" "$(cat "$h/.config/opencode/agent/helper.md")"
+
+# --- Case 27: --target codex restricts destinations to codex only.
+h=$(new_home)
+add_user_command "$h/.claude" scoped
+printf 'global\n' >"$h/.claude/CLAUDE.md"
+write_manifest "$h"
+run_sync "$h" --target codex >/dev/null
+assert_exists "case27: codex prompt linked" "$h/.codex/prompts/scoped.md"
+assert_exists "case27: codex AGENTS.md linked" "$h/.codex/AGENTS.md"
+assert_missing "case27: no opencode command" "$h/.config/opencode/command/scoped.md"
+assert_missing "case27: no cursor command" "$h/.cursor/commands/scoped.md"
+assert_missing "case27: no pi prompt" "$h/.pi/agent/prompts/scoped.md"
+
+# --- Case 28: --write-mcp merges Claude-shaped servers into cursor's mcp.json.
+h=$(new_home)
+write_manifest "$h"
+printf '%s\n' '{"mcpServers":{"ctx7":{"command":"npx","args":["-y","ctx7"],"env":{"K":"v"}}}}' \
+  >"$h/.claude.json"
+run_sync "$h" --write-mcp >/dev/null
+assert_eq "case28: cursor mcp.json carries the server in Claude shape" \
+  "npx" "$(jq -r '.mcpServers.ctx7.command' "$h/.cursor/mcp.json" 2>/dev/null)"
+assert_eq "case28: env preserved verbatim" \
+  "v" "$(jq -r '.mcpServers.ctx7.env.K' "$h/.cursor/mcp.json" 2>/dev/null)"
+
+# --- Case 29: --mcp-snippet prints a codex TOML block; nothing is written to config.toml.
+h=$(new_home)
+write_manifest "$h"
+printf '%s\n' '{"mcpServers":{"ctx7":{"command":"npx","args":["-y","ctx7"],"env":{"K":"v"}}}}' \
+  >"$h/.claude.json"
+out=$(run_sync "$h" --mcp-snippet)
+assert_contains "case29: TOML server table printed" "[mcp_servers.ctx7]" "$out"
+assert_contains "case29: env translated to env_vars" 'env_vars = { K = "v" }' "$out"
+assert_missing "case29: config.toml never written" "$h/.codex/config.toml"
+
+# --- Case 30: plain ~/.claude/agents is NOT linked for cursor — cursor scans it natively,
+# and a link would show every agent twice.
+h=$(new_home)
+add_user_agent "$h/.claude" native
+write_manifest "$h"
+run_sync "$h" >/dev/null
+assert_missing "case30: no cursor link for plain claude agents" "$h/.cursor/agents/native.md"
 
 echo
 echo "$pass_count passed, $failures failed"

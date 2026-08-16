@@ -1014,6 +1014,9 @@ if [ -n "$mcp_translated" ] && [ "$mcp_snippet" -eq 1 ]; then
     echo "paste into $codex_dir/config.toml (printed only — TOML is never machine-edited):"
     printf '%s\n' "$mcp_merged" | jq -r "$MCP_TO_CODEX_TOML"
   fi
+  # Snippet mode is print-only and always wins: clear the translation so the opencode
+  # write block below can never fire in the same run, even when --write-mcp was also given.
+  mcp_translated=""
 elif [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
   # Cursor's mcp.json uses Claude's own {command, args, env} shape under mcpServers, so the
   # merged Claude set is written near-verbatim — regenerated from Claude config on every

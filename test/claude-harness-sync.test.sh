@@ -715,6 +715,17 @@ write_manifest "$h"
 run_sync "$h" >/dev/null
 assert_missing "case30: no cursor link for plain claude agents" "$h/.cursor/agents/native.md"
 
+# --- Case 31: --mcp-snippet is print-only even when --write-mcp is also given — snippet
+# mode always wins, for every harness.
+h=$(new_home)
+write_manifest "$h"
+printf '%s\n' '{"mcpServers":{"ctx7":{"command":"npx","args":["-y","ctx7"]}}}' >"$h/.claude.json"
+out=$(run_sync "$h" --mcp-snippet --write-mcp)
+assert_contains "case31: snippet still printed" "[mcp_servers.ctx7]" "$out"
+assert_missing "case31: opencode.jsonc never written" "$h/.config/opencode/opencode.jsonc"
+assert_missing "case31: cursor mcp.json never written" "$h/.cursor/mcp.json"
+assert_missing "case31: codex config.toml never written" "$h/.codex/config.toml"
+
 echo
 echo "$pass_count passed, $failures failed"
 [ "$failures" -eq 0 ] || exit 1

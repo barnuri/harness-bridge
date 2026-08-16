@@ -182,7 +182,7 @@ so removal stays recoverable). Optional: `claude` for `--report`, `opencode`/`pi
 ## Tests
 
 ```bash
-bash test/claude-harness-sync.test.sh   # 119 assertions, throwaway fixture HOME
+bash test/claude-harness-sync.test.sh   # 123 assertions, throwaway fixture HOME
 ```
 
 Every case runs against a temporary `HOME`; the suite never reads or writes the real

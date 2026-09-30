@@ -166,6 +166,7 @@ cursor_append_explicit=0
 
 dry_run=0
 prune=1
+force=0
 target="all"
 project_root=""
 no_project=0
@@ -179,7 +180,7 @@ Make an existing Claude Code setup usable from opencode, pi, codex, cursor, and 
 Copilot CLI, using symlinks only. The Claude Code setup is the source of truth and is
 never modified.
 
-  bin/harness-bridge.sh [--dry-run] [--no-prune] [--target all|opencode|pi|codex|cursor|copilot]
+  bin/harness-bridge.sh [--dry-run] [--no-prune] [--force] [--target all|opencode|pi|codex|cursor|copilot]
                                 [--project DIR | --no-project] [--mcp-snippet] [--write-mcp]
                                 [--cursor-append-prompt FILE]
 
@@ -205,6 +206,11 @@ Linked, because the harness does not scan them:
 
   --dry-run       print the planned links and prunes, change nothing
   --no-prune      keep stale links instead of removing them
+  --force         overwrite a real file/dir or a hand-made symlink already at the
+                  destination (e.g. an existing ~/.copilot/copilot-instructions.md) instead
+                  of leaving it alone. Off by default; needs 'trash' installed to replace a
+                  real file/dir (never a raw rm), otherwise that entry is still reported and
+                  left alone
   --target        restrict destinations to one harness (default: all)
   --project DIR   also link that project's .claude/ (default: cwd when it has one)
   --no-project    skip project-level linking entirely
@@ -222,7 +228,8 @@ Linked, because the harness does not scan them:
   -h, --help      this message
 
 Default is safe: only symlinks pointing into a Claude source root are ever removed. Real
-files, real directories, and hand-made links are reported and left alone.
+files, real directories, and hand-made links are reported and left alone, unless --force
+is given.
 USAGE
   exit "${1:-0}"
 }
@@ -367,6 +374,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) dry_run=1 ;;
     --no-prune) prune=0 ;;
+    --force) force=1 ;;
     --prune) prune=1 ;;
     --target)
       [ $# -ge 2 ] || die "--target needs a value (all|opencode|pi|codex|cursor|copilot)"
@@ -405,11 +413,26 @@ case "$target" in
   *) die "--target must be one of: all, opencode, pi, codex, cursor, copilot (got '$target')" ;;
 esac
 
-command -v jq >/dev/null 2>&1 || die "jq is required (brew install jq)"
+command -v jq >/dev/null 2>&1 || die "jq is required (macOS: brew install jq / Linux: apt install jq or dnf install jq / Windows: winget install jqlang.jq)"
 
 if [ "$report" -eq 1 ]; then
   run_report
   exit 0
+fi
+
+# This tool is a symlink engine, so it is dead on arrival without symlink privilege —
+# most commonly hit on Windows, where creating one needs either Developer Mode (Windows
+# 10/11) or an elevated shell, unlike macOS/Linux where any user can. Caught once, up
+# front, with one actionable message, instead of every individual link failing silently
+# and being reported as an opaque "link failed" conflict one at a time.
+if [ "$dry_run" -eq 0 ]; then
+  symlink_probe_dir=$(mktemp -d) && symlink_probe_target="$symlink_probe_dir/target"
+  : >"$symlink_probe_target" 2>/dev/null
+  if ! ln -s "$symlink_probe_target" "$symlink_probe_dir/link" 2>/dev/null; then
+    rm -rf "$symlink_probe_dir" 2>/dev/null
+    die "cannot create symlinks on this system — on Windows, enable Developer Mode (Settings > Update & Security > For developers) or run this from an elevated shell; WSL2 avoids the issue entirely. Use --dry-run to preview the plan without creating links."
+  fi
+  rm -rf "$symlink_probe_dir" 2>/dev/null
 fi
 
 # Default the project to the cwd, but only when it actually carries Claude config the
@@ -452,6 +475,7 @@ pruned=0
 skipped_plugins=0
 collisions=""
 conflicts=""
+forced=""
 fixups=""
 mcp_plugins=""
 hook_plugins=""
@@ -933,18 +957,40 @@ while IFS="	" read -r kind src dst; do
       continue
     fi
     if ! is_owned_link "$dst"; then
-      conflicts="$conflicts
+      if [ "$force" -eq 1 ]; then
+        forced="$forced
+  $dst (existing symlink not created by this script — replaced, --force given)"
+        [ "$dry_run" -eq 1 ] || rm -- "$dst" 2>/dev/null
+      else
+        conflicts="$conflicts
   $dst (existing symlink not created by this script — left alone)"
-      continue
+        continue
+      fi
     fi
   elif [ -e "$dst" ]; then
     # Our own regenerated shim may be overwritten; anything else is the user's content.
     if ! is_own_shim "$dst"; then
-      conflicts="$conflicts
+      if [ "$force" -eq 1 ]; then
+        if [ "$dry_run" -eq 1 ]; then
+          forced="$forced
+  $dst (real file/dir already there — would be replaced, --force given)"
+        elif command -v trash >/dev/null 2>&1; then
+          trash "$dst" 2>/dev/null || { conflicts="$conflicts
+  $dst (--force given, but 'trash' failed to remove it — left alone)"; continue; }
+          forced="$forced
+  $dst (real file/dir already there — replaced, --force given)"
+        else
+          conflicts="$conflicts
+  $dst (--force given, but needs 'trash' installed to safely replace a real file/dir — left alone)"
+          continue
+        fi
+      else
+        conflicts="$conflicts
   $dst (real file/dir already there — left alone)"
-      continue
+        continue
+      fi
     fi
-    if is_shim_kind "$kind" && [ "$(render_shim "$kind" "$src")" = "$(cat "$dst")" ]; then
+    if is_shim_kind "$kind" && [ -e "$dst" ] && [ "$(render_shim "$kind" "$src")" = "$(cat "$dst")" ]; then
       unchanged=$((unchanged + 1))
       continue
     fi
@@ -1074,6 +1120,7 @@ printf 'targets: skills -> %s (opencode + pi + codex + cursor + copilot all scan
 [ -n "$shadowed" ] && printf '\nnot linked — opencode already sees an equally-named skill in ~/.claude/skills,\nso linking the plugin copy would duplicate it:%s\n' "$shadowed"
 [ -n "$collisions" ] && printf '\nname collisions (prefixed with the plugin name):%s\n' "$collisions"
 [ -n "$conflicts" ] && printf '\nleft alone (not ours to touch):%s\n' "$conflicts"
+[ -n "$forced" ] && printf '\noverwritten (--force given):%s\n' "$forced"
 [ -n "$fixups" ] && printf '\nmay need manual fixup — these skills reference ${CLAUDE_PLUGIN_ROOT},\nwhich only Claude Code sets, so paths inside them will not resolve under opencode/pi:%s\n' "$fixups"
 
 # Reports a Claude resource opencode finds by itself. Present/absent is shown so the line
@@ -1199,7 +1246,7 @@ MCP_TO_COPILOT='to_entries
          env: (.value.env // {}),
          tools: ["*"]}
       else
-        {type: (.value.type // "http"),
+        {type: "http",
          url: (.value.url // ""),
          headers: (.value.headers // {}),
          tools: ["*"]}

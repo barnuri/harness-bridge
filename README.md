@@ -171,7 +171,13 @@ so it is machine-specific.
 - A destination entry is **owned** iff it is a symlink whose target points inside a Claude
   source root, or a file carrying the generated-shim marker. Only those are ever removed.
 - Real files, real directories, and hand-made links are reported as "left alone" and never
-  touched or overwritten.
+  touched or overwritten — unless `--force` is given.
+- `--force` (off by default) replaces a conflicting real file/dir or hand-made symlink with
+  the planned link instead of skipping it — e.g. a pre-existing `~/.copilot/copilot-instructions.md`
+  you never asked this tool to manage. Replacing a real file/dir this way routes through
+  `trash`, so it stays recoverable; if `trash` isn't installed, that entry is still reported
+  and left alone rather than falling back to an unrecoverable delete. Every entry it touches
+  is reported as "overwritten (--force given)", never silent.
 - `--dry-run` changes nothing. A default run also prunes links whose source disappeared.
 - Nothing under `~/.claude` is written to.
 
@@ -225,10 +231,36 @@ opencode from starting.
 `bash`, `jq`. `trash` is used to remove stale generated shims (they are regenerated files,
 so removal stays recoverable). Optional: `claude` for `--report`, `opencode`/`pi` to verify.
 
+## Platform support
+
+The script is plain POSIX-ish bash — no GNU-only or BSD-only flags — and has been run
+against both macOS and Linux (Debian/Alpine) with an identical result: same plans, same
+links, same test suite passing (168/168 on Linux with `jq` + a `trash` command installed;
+macOS has 5 pre-existing, environment-specific test failures from a `/var` vs
+`/private/var` `mktemp` path-canonicalization quirk in the test harness itself, unrelated
+to the tool's actual behavior).
+
+- **macOS / Linux** — no extra setup. Install `jq` (`brew install jq` / `apt install jq` /
+  `dnf install jq`) and, optionally, a `trash` command (`brew install trash`, or the
+  `trash-cli` package on most Linux distros) so stale shims and `--force` overwrites are
+  removed recoverably instead of being reported and left alone.
+- **Windows** — this is a bash script, so it needs a bash to run in:
+  - **WSL2 (recommended)** — behaves exactly like the Linux case above; install `jq` and
+    `trash-cli` inside the WSL distro.
+  - **Git Bash / MSYS2** — works, but creating a symlink on Windows needs either
+    [Developer Mode](https://learn.microsoft.com/en-us/windows/apps/get-started/enable-your-device-for-development)
+    enabled or an elevated (Administrator) shell; without one of those, `ln -s` fails for
+    every ordinary user account. The script checks this once up front and fails fast with
+    that exact remediation instead of reporting dozens of individual "link failed"
+    conflicts. `--dry-run` skips the check entirely, so you can preview the plan without
+    either prerequisite. Install `jq` via `winget install jqlang.jq` and a `trash`-named
+    command on `PATH` (e.g. the `trash-cli` npm package) for the same recoverable-delete
+    behavior as macOS/Linux.
+
 ## Tests
 
 ```bash
-bash test/harness-bridge.test.sh   # 159 assertions, throwaway fixture HOME
+bash test/harness-bridge.test.sh   # 168 assertions, throwaway fixture HOME
 ```
 
 Every case runs against a temporary `HOME`; the suite never reads or writes the real

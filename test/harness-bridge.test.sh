@@ -838,6 +838,20 @@ assert_eq "case40: pre-existing real copilot-instructions.md untouched" \
   "hand-written copilot instructions" "$(cat "$h/.copilot/copilot-instructions.md")"
 assert_contains "case40: conflict reported" "left alone" "$out"
 
+# --- Case 40b: --force overwrites a pre-existing real copilot-instructions.md (when
+# 'trash' is available) and reports it as overwritten rather than left alone.
+if command -v trash >/dev/null 2>&1; then
+  h=$(new_home)
+  printf 'my global instructions\n' >"$h/.claude/CLAUDE.md"
+  mkdir -p "$h/.copilot"
+  printf 'hand-written copilot instructions\n' >"$h/.copilot/copilot-instructions.md"
+  write_manifest "$h"
+  out=$(run_sync "$h" --force)
+  assert_link_to "case40b: --force replaces the real file with a symlink" \
+    "$h/.copilot/copilot-instructions.md" "$h/.claude/CLAUDE.md"
+  assert_contains "case40b: overwrite reported" "overwritten" "$out"
+fi
+
 # --- Case 41: --target copilot restricts destinations to copilot only, and no plugin
 # command linking happens for it (copilot has no command/prompt-file concept).
 h=$(new_home)
@@ -887,6 +901,44 @@ write_manifest "$h"
 run_sync_raw "$h" --project "$proj" >/dev/null
 assert_link_to "case44: project agent -> project .github/agents" \
   "$proj/.github/agents/reviewer.md" "$proj/.claude/agents/reviewer.md"
+
+# --- Case 45: a Claude remote (url-based) MCP server is normalized to copilot's own
+# accepted "http" type, regardless of Claude's own source type value (e.g. "sse").
+h=$(new_home)
+write_manifest "$h"
+printf '%s\n' '{"mcpServers":{"remote1":{"type":"sse","url":"https://example.com/mcp","headers":{"X":"y"}}}}' \
+  >"$h/.claude.json"
+run_sync "$h" --write-mcp >/dev/null
+assert_eq "case45: remote server normalized to http type" \
+  "http" "$(jq -r '.mcpServers.remote1.type' "$h/.copilot/mcp-config.json" 2>/dev/null)"
+assert_eq "case45: url carried over" \
+  "https://example.com/mcp" "$(jq -r '.mcpServers.remote1.url' "$h/.copilot/mcp-config.json" 2>/dev/null)"
+assert_eq "case45: headers preserved" \
+  "y" "$(jq -r '.mcpServers.remote1.headers.X' "$h/.copilot/mcp-config.json" 2>/dev/null)"
+
+# --- Case 46: stale copilot agent links (global and project) are pruned once their
+# Claude source disappears.
+h=$(new_home)
+add_user_agent "$h/.claude" temporary
+write_manifest "$h"
+run_sync "$h" >/dev/null
+assert_exists "case46: copilot agent linked while the source exists" \
+  "$h/.copilot/agents/temporary.md"
+mv "$h/.claude/agents/temporary.md" "$h/removed-agent.md"
+out=$(run_sync "$h")
+assert_missing "case46: copilot agent link pruned once the source is gone" \
+  "$h/.copilot/agents/temporary.md"
+
+proj=$(mktemp -d)
+mkdir -p "$proj/.claude/agents"
+printf -- '---\nname: reviewer\ndescription: d\n---\nbody\n' >"$proj/.claude/agents/reviewer.md"
+run_sync_raw "$h" --project "$proj" >/dev/null
+assert_exists "case46: project copilot agent linked while the source exists" \
+  "$proj/.github/agents/reviewer.md"
+mv "$proj/.claude/agents/reviewer.md" "$proj/removed-agent.md"
+run_sync_raw "$h" --project "$proj" >/dev/null
+assert_missing "case46: project copilot agent link pruned once the source is gone" \
+  "$proj/.github/agents/reviewer.md"
 
 echo
 echo "$pass_count passed, $failures failed"

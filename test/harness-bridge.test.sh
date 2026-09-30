@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for harness-bridge.sh — the Claude Code plugin -> opencode/pi link sync.
+# Tests for harness-bridge.sh — the Claude Code resource bridge across harnesses.
 #
 # The invariants worth protecting are about *not destroying things*: the script writes into
 # three directories the user also edits by hand (~/.agents/skills, ~/.config/opencode,
@@ -9,7 +9,7 @@
 # linking a dead version silently serves stale skills to both harnesses.
 #
 # Every case runs against a throwaway fixture HOME. The real ~/.claude, ~/.config/opencode,
-# ~/.pi, and ~/.agents are never read or written.
+# ~/.pi, ~/.agents, and ~/.copilot are never read or written.
 #
 # Run: bash harness-bridge.test.sh
 # Exits non-zero (and prints which case failed) if any assertion fails.
@@ -115,6 +115,10 @@ add_agent() {
   printf -- '---\nname: %s\ndescription: %s\n---\nbe an agent\n' "$2" "$2" >"$1/agents/$2.md"
 }
 
+add_plugin_manifest() {
+  jq -n --arg name "$2" '{name:$name,version:"1.0.0"}' >"$1/plugin.json"
+}
+
 # write_manifest <home> <plugin@marketplace> <installPath> [more pairs...]
 write_manifest() {
   local home="$1"
@@ -134,6 +138,7 @@ run_sync() {
   local home="$1"
   shift
   env -u CURSOR_APPEND_PROMPT -u HARNESS_GLOBAL_INSTRUCTIONS_DIR \
+    -u COPILOT_HOME -u COPILOT_CONFIG_DIR \
     HOME="$home" bash "$SCRIPT" --no-project "$@" 2>&1
 }
 
@@ -141,6 +146,7 @@ run_sync_raw() {
   local home="$1"
   shift
   env -u CURSOR_APPEND_PROMPT -u HARNESS_GLOBAL_INSTRUCTIONS_DIR \
+    -u COPILOT_HOME -u COPILOT_CONFIG_DIR \
     HOME="$home" bash "$SCRIPT" "$@" 2>&1
 }
 
@@ -1073,6 +1079,113 @@ out=$(run_sync "$h" --env-file "$h/bad.env" || true)
 assert_contains "case53: unsupported dotenv option is rejected" \
   "unsupported option" "$out"
 assert_missing "case53: dotenv content is never executed" "$h/pwned"
+
+# --- Case 54: Copilot plugin import merges marketplaces and installed plugin state.
+h=$(new_home)
+enabled_plugin=$(add_plugin "$h" demo-market enabled 1.0.0)
+disabled_plugin=$(add_plugin "$h" demo-market disabled 1.0.0)
+add_plugin_manifest "$enabled_plugin" enabled
+add_plugin_manifest "$disabled_plugin" disabled
+write_manifest "$h" "enabled@demo-market" "$enabled_plugin" \
+  "disabled@demo-market" "$disabled_plugin"
+marketplace="$h/.claude/plugins/marketplaces/demo-market"
+mkdir -p "$marketplace"
+jq -n --arg path "$marketplace" \
+  '{"demo-market":{"source":{"source":"directory","path":$path}}}' \
+  >"$h/.claude/plugins/known_marketplaces.json"
+jq -n \
+  '{"enabledPlugins":{"enabled@demo-market":true,"disabled@demo-market":false}}' \
+  >"$h/.claude/settings.json"
+mkdir -p "$h/.copilot"
+printf '%s\n' \
+  '{"theme":"dark","enabledPlugins":{"existing@other":true},"extraKnownMarketplaces":{"existing":{"source":{"source":"github","repo":"example/existing"}}}}' \
+  >"$h/.copilot/settings.json"
+out=$(run_sync "$h" --target copilot --write-plugins)
+assert_eq "case54: existing Copilot setting is preserved" \
+  "dark" "$(jq -r '.theme' "$h/.copilot/settings.json")"
+assert_eq "case54: Claude marketplace is registered" \
+  "$marketplace" "$(jq -r '.extraKnownMarketplaces["demo-market"].source.path' "$h/.copilot/settings.json")"
+assert_eq "case54: installed enabled plugin is enabled" \
+  "true" "$(jq -r '.enabledPlugins["enabled@demo-market"]' "$h/.copilot/settings.json")"
+assert_eq "case54: disabled Claude plugin remains disabled" \
+  "false" "$(jq -r '.enabledPlugins["disabled@demo-market"]' "$h/.copilot/settings.json")"
+assert_eq "case54: existing Copilot plugin value is preserved" \
+  "true" "$(jq -r '.enabledPlugins["existing@other"]' "$h/.copilot/settings.json")"
+assert_contains "case54: reports plugin enablement" \
+  "Copilot CLI will attempt to install compatible enabled plugins" "$out"
+first_settings=$(cat "$h/.copilot/settings.json")
+out=$(run_sync "$h" --target copilot --write-plugins)
+assert_eq "case54: repeated import is idempotent" "$first_settings" \
+  "$(cat "$h/.copilot/settings.json")"
+
+# --- Case 55: plugin import is opt-in and dry-run leaves Copilot settings unchanged.
+h=$(new_home)
+p=$(add_plugin "$h" mp demo 1.0.0)
+add_plugin_manifest "$p" demo
+write_manifest "$h" "demo@mp" "$p"
+mkdir -p "$h/.claude/plugins/marketplaces/mp"
+jq -n --arg path "$h/.claude/plugins/marketplaces/mp" \
+  '{"mp":{"source":{"source":"directory","path":$path}}}' \
+  >"$h/.claude/plugins/known_marketplaces.json"
+run_sync "$h" --target copilot >/dev/null
+assert_missing "case55: default sync does not enable Copilot plugins" \
+  "$h/.copilot/settings.json"
+out=$(run_sync "$h" --target copilot --write-plugins --dry-run)
+assert_contains "case55: dry-run previews marketplace/plugin settings" \
+  "would add 1 marketplace(s) and 1 plugin(s)" "$out"
+assert_missing "case55: dry-run does not write Copilot settings" \
+  "$h/.copilot/settings.json"
+
+# --- Case 56: JSONC Copilot settings are preserved instead of rewritten by jq.
+h=$(new_home)
+p=$(add_plugin "$h" mp demo 1.0.0)
+add_plugin_manifest "$p" demo
+write_manifest "$h" "demo@mp" "$p"
+mkdir -p "$h/.claude/plugins/marketplaces/mp" "$h/.copilot"
+jq -n --arg path "$h/.claude/plugins/marketplaces/mp" \
+  '{"mp":{"source":{"source":"directory","path":$path}}}' \
+  >"$h/.claude/plugins/known_marketplaces.json"
+printf '{\n  // keep this comment\n  "theme": "dark"\n}\n' >"$h/.copilot/settings.json"
+settings_before=$(cat "$h/.copilot/settings.json")
+out=$(run_sync "$h" --target copilot --write-plugins)
+assert_eq "case56: JSONC Copilot settings remain unchanged" \
+  "$settings_before" "$(cat "$h/.copilot/settings.json")"
+assert_contains "case56: invalid JSONC is reported" \
+  "is not valid JSON or has invalid plugin settings" "$out"
+
+# --- Case 57: COPILOT_HOME redirects imported plugin settings.
+h=$(new_home)
+p=$(add_plugin "$h" mp demo 1.0.0)
+add_plugin_manifest "$p" demo
+write_manifest "$h" "demo@mp" "$p"
+mkdir -p "$h/.claude/plugins/marketplaces/mp"
+jq -n --arg path "$h/.claude/plugins/marketplaces/mp" \
+  '{"mp":{"source":{"source":"directory","path":$path}}}' \
+  >"$h/.claude/plugins/known_marketplaces.json"
+env -u COPILOT_CONFIG_DIR -u CURSOR_APPEND_PROMPT -u HARNESS_GLOBAL_INSTRUCTIONS_DIR \
+  HOME="$h" COPILOT_HOME="$h/copilot-home" bash "$SCRIPT" --no-project \
+  --target copilot --write-plugins >/dev/null
+assert_exists "case57: COPILOT_HOME settings receive imported plugins" \
+  "$h/copilot-home/settings.json"
+assert_missing "case57: default Copilot config remains untouched" \
+  "$h/.copilot/settings.json"
+
+# --- Case 58: plugins without a Copilot-supported manifest remain component-only.
+h=$(new_home)
+p=$(add_plugin "$h" mp demo 1.0.0)
+add_skill "$p" included
+write_manifest "$h" "demo@mp" "$p"
+mkdir -p "$h/.claude/plugins/marketplaces/mp"
+jq -n --arg path "$h/.claude/plugins/marketplaces/mp" \
+  '{"mp":{"source":{"source":"directory","path":$path}}}' \
+  >"$h/.claude/plugins/known_marketplaces.json"
+out=$(run_sync "$h" --target copilot --write-plugins)
+assert_contains "case58: missing plugin manifest is reported" \
+  "skipped 1 plugin(s) without a Copilot-supported plugin manifest" "$out"
+assert_eq "case58: compatible component remains linked" \
+  "$p/skills/included" "$(readlink "$h/.agents/skills/included")"
+assert_eq "case58: unsupported plugin is not enabled natively" \
+  "0" "$(jq '.enabledPlugins // {} | length' "$h/.copilot/settings.json")"
 
 echo
 echo "$pass_count passed, $failures failed"

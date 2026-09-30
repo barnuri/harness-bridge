@@ -16,6 +16,8 @@ updated whenever harness support changes (see `CLAUDE.md`).
 | Claude resource | opencode | pi | codex | cursor | copilot |
 |---|---|---|---|---|---|
 | **Plugin skills** | ✅ link → `~/.agents/skills/` | ✅ same link | ✅ same link (documented symlink support) | ✅ same link ⚠ CLI caveat below | ✅ same link (also auto-scanned) |
+| **Claude plugin marketplaces** (`known_marketplaces.json`) | — components linked individually | — components linked individually | — components linked individually | — components linked individually | ✅ `--write-plugins` → native `extraKnownMarketplaces` settings for compatible catalogs |
+| **Installed Claude plugins** (`installed_plugins.json`) | — components linked individually | — components linked individually | — components linked individually | — components linked individually | ✅ `--write-plugins` → native `enabledPlugins` settings |
 | **Plain `~/.claude/skills/`** | ✅ auto-scanned | — not scanned | — not scanned | ✅ auto-scanned (compat dir) | — not scanned (project `.claude/skills` is, though) |
 | **Plugin subagents** (`agents/*.md`) | ✅ link/shim → `~/.config/opencode/agent/` | — no subagent concept | — TOML agents, different schema | ✅ link → `~/.cursor/agents/` (reads Claude markdown as-is) | ✅ link → `~/.copilot/agents/` (reads Claude markdown as-is) |
 | **Plain `~/.claude/agents/`** | ✅ link/shim | — | — | ✅ auto-scanned (compat dir) | ✅ link → `~/.copilot/agents/` (not auto-scanned) |
@@ -25,9 +27,9 @@ updated whenever harness support changes (see `CLAUDE.md`).
 | **MCP servers** | ✅ `--write-mcp` → `opencode.jsonc` (translated) | — no MCP support | 🟡 `--mcp-snippet` prints TOML to paste | ✅ `--write-mcp` → `~/.cursor/mcp.json` (same schema as Claude) | ✅ `--write-mcp` → `~/.copilot/mcp-config.json` (translated) |
 | **Saved dynamic workflows** (plugin `workflows/*.js`, `~/.claude/workflows/`, `.claude/workflows/`) | — no Workflow runtime | — | — | — | — |
 | **Hooks / permissions** | — | — | — | — | — (own hooks system, different mechanism) |
-| **Coverage** | **8/10 (80%)** | **3/10 (30%)** | **3.5/10 (35%)** | **7.5/10 (75%)** | **6/10 (60%)** |
+| **Coverage** | **8/12 (67%)** | **3/12 (25%)** | **3.5/12 (29%)** | **7.5/12 (63%)** | **8/12 (67%)** |
 
-Coverage counts the 10 resource rows above: ✅ = 1, 🟡 (manual paste step) = 0.5, — = 0.
+Coverage counts the 12 resource rows above: ✅ = 1, 🟡 (manual paste step) = 0.5, — = 0.
 No harness can reach 100% — Claude's dynamic-workflow runtime (`agent()`/`pipeline()`
 scripts) and hooks/permissions have no equivalent anywhere. The workaround for workflows
 is in the skill, not the sync: write execution tiers that detect capability, the way
@@ -45,6 +47,7 @@ cursor-agent after syncing.
 bin/harness-bridge.sh --report     # what's shared, what's missing
 bin/harness-bridge.sh --dry-run    # what it would do
 bin/harness-bridge.sh --write-mcp  # do it, including MCP servers
+bin/harness-bridge.sh --target copilot --write-plugins  # register Claude marketplaces and enable installed plugins
 
 # use a generic global instruction bundle
 bin/harness-bridge.sh --global-instructions-dir ~/path/to/global-instructions
@@ -111,6 +114,7 @@ Supported keys:
 | `HARNESS_BRIDGE_NO_PROJECT` | `--no-project` |
 | `HARNESS_BRIDGE_MCP_SNIPPET` | `--mcp-snippet` |
 | `HARNESS_BRIDGE_WRITE_MCP` | `--write-mcp` |
+| `HARNESS_BRIDGE_WRITE_PLUGINS` | `--write-plugins` |
 | `HARNESS_BRIDGE_NO_CURSOR_APPEND_PROMPT` | `--no-cursor-append-prompt` |
 
 Precedence is explicit CLI arguments, then the selected dotenv file, then ordinary
@@ -149,6 +153,8 @@ global one, so it is linked to `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md`, an
 
 | Source | Destination | Used by |
 |---|---|---|
+| Claude `plugins/known_marketplaces.json` | `~/.copilot/settings.json` (`extraKnownMarketplaces`) via `--write-plugins` | Copilot CLI |
+| Claude `plugins/installed_plugins.json` | `~/.copilot/settings.json` (`enabledPlugins`) via `--write-plugins` | Copilot CLI |
 | plugin `skills/<name>/` | `~/.agents/skills/<name>` | opencode + pi + codex + cursor + copilot |
 | plugin `agents/*.md` | `~/.config/opencode/agent/`, `~/.cursor/agents/`, `~/.copilot/agents/` | opencode, cursor, copilot |
 | plugin `commands/*.md` | `~/.config/opencode/command/`, `~/.pi/agent/prompts/`, `~/.cursor/commands/`, `~/.codex/prompts/` | opencode, pi, cursor, codex |
@@ -166,6 +172,15 @@ Whole skill *directories* are linked, not just `SKILL.md`, so bundled scripts an
 references resolve. All five harnesses follow symlinked skill directories (see the cursor
 CLI caveat above). copilot CLI has no user-definable slash-command/prompt-file surface at
 all, so Claude's `commands/*.md` are reported as not migrated for it rather than linked.
+`--write-plugins` imports Claude marketplace sources and installed plugin enablement into
+Copilot's native settings; Copilot attempts to install compatible enabled plugins when it
+starts. The option is explicit because plugins can activate hooks and other integrations.
+Existing Copilot settings take precedence, disabled Claude plugins remain disabled, and
+JSONC or invalid `settings.json` files are left untouched. Claude plugins without a
+Copilot-supported plugin manifest still expose their compatible skills and agents through
+the existing component links, but do not install as native Copilot plugins. Marketplace
+catalogs with source types or metadata Copilot does not support may be registered but can
+fail when Copilot tries to install from them.
 
 ## The three places a symlink cannot work
 
@@ -332,7 +347,7 @@ links, with the same test suite passing on macOS and Linux.
 ## Tests
 
 ```bash
-bash test/harness-bridge.test.sh   # 191 assertions, throwaway fixture HOME
+bash test/harness-bridge.test.sh   # 208 assertions, throwaway fixture HOME
 ```
 
 Every case runs against a temporary `HOME`; the suite never reads or writes the real

@@ -121,6 +121,9 @@
 #   merges, the same way as for opencode.
 #   copilot CLI has no user-definable slash-command/prompt-file surface, so Claude's
 #   commands/*.md have nothing to link to and are reported as not migrated.
+#   Claude marketplaces and installed plugins can be registered declaratively in
+#   ~/.copilot/settings.json (`extraKnownMarketplaces` and `enabledPlugins`). Since enabling
+#   plugins may download and activate their components, this is only done with --write-plugins.
 #
 # Usage:
 #   bin/harness-bridge.sh [--dry-run] [--no-prune] [--target all|opencode|pi|codex|cursor|copilot]
@@ -188,6 +191,7 @@ load_env_file() {
       HARNESS_BRIDGE_TARGET | HARNESS_BRIDGE_PROJECT | HARNESS_BRIDGE_DRY_RUN | \
       HARNESS_BRIDGE_NO_PRUNE | HARNESS_BRIDGE_FORCE | HARNESS_BRIDGE_NO_PROJECT | \
       HARNESS_BRIDGE_MCP_SNIPPET | HARNESS_BRIDGE_WRITE_MCP | \
+      HARNESS_BRIDGE_WRITE_PLUGINS | \
       HARNESS_BRIDGE_NO_CURSOR_APPEND_PROMPT)
         if [ "$key" = "HARNESS_GLOBAL_INSTRUCTIONS_DIR" ]; then
           case "$value" in /*) ;; *) value="$file_dir/$value" ;; esac
@@ -226,7 +230,7 @@ opencode_dir="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 pi_dir="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 codex_dir="${CODEX_HOME_DIR:-$HOME/.codex}"
 cursor_dir="${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
-copilot_dir="${COPILOT_CONFIG_DIR:-$HOME/.copilot}"
+copilot_dir="${COPILOT_CONFIG_DIR:-${COPILOT_HOME:-$HOME/.copilot}}"
 global_instructions_dir="${HARNESS_GLOBAL_INSTRUCTIONS_DIR:-}"
 global_instructions_explicit=0
 [ -n "$global_instructions_dir" ] && global_instructions_explicit=1
@@ -247,6 +251,7 @@ project_root="${HARNESS_BRIDGE_PROJECT:-}"
 no_project=$(env_flag HARNESS_BRIDGE_NO_PROJECT 0)
 mcp_snippet=$(env_flag HARNESS_BRIDGE_MCP_SNIPPET 0)
 write_mcp=$(env_flag HARNESS_BRIDGE_WRITE_MCP 0)
+write_plugins=$(env_flag HARNESS_BRIDGE_WRITE_PLUGINS 0)
 report=0
 [ "$(env_flag HARNESS_BRIDGE_NO_CURSOR_APPEND_PROMPT 0)" -eq 1 ] && {
   cursor_append_prompt=""
@@ -260,7 +265,7 @@ Copilot CLI. Claude is the default source of truth; an optional generic global i
 bundle can provide shared and harness-specific files. The Claude setup is never modified.
 
   bin/harness-bridge.sh [--dry-run] [--no-prune] [--force] [--target all|opencode|pi|codex|cursor|copilot]
-                                [--project DIR | --no-project] [--mcp-snippet] [--write-mcp]
+                                [--project DIR | --no-project] [--mcp-snippet] [--write-mcp] [--write-plugins]
                                 [--env-file FILE]
                                 [--global-instructions-dir DIR]
                                 [--cursor-append-prompt FILE]
@@ -300,6 +305,8 @@ Linked, because the harness does not scan them:
                   copilot mcp-config.json)
   --write-mcp     merge MCP servers into opencode.jsonc + cursor mcp.json + copilot
                   mcp-config.json (codex: snippet only)
+  --write-plugins register Claude marketplaces and enable installed plugins in Copilot
+                  settings.json; Copilot CLI installs them when it starts
   --env-file FILE load persistent options from a dotenv file. CLI arguments override it;
                   defaults to $HARNESS_BRIDGE_ENV_FILE, then ./.harness-bridge.env
   --global-instructions-dir DIR
@@ -492,6 +499,7 @@ while [ $# -gt 0 ]; do
     --no-project) no_project=1 ;;
     --mcp-snippet) mcp_snippet=1 ;;
     --write-mcp) write_mcp=1 ;;
+    --write-plugins) write_plugins=1 ;;
     --env-file)
       [ $# -ge 2 ] || die "--env-file needs a file"
       shift
@@ -608,6 +616,8 @@ case "$target" in
   cursor) want_cursor=1 ;;
   copilot) want_copilot=1 ;;
 esac
+[ "$write_plugins" -eq 0 ] || [ "$want_copilot" -eq 1 ] ||
+  die "--write-plugins requires --target all or --target copilot"
 
 # Plan lines: <kind>\t<src>\t<dst>. Built first, applied second; dst_file holds the same
 # destinations one-per-line and doubles as the keep-list for pruning.
@@ -1630,5 +1640,159 @@ elif [ -n "$mcp_translated" ] && [ "$mcp_snippet" -eq 0 ]; then
   echo "  copilot mcp-config.json); --write-mcp merges into opencode.jsonc, cursor mcp.json, and"
   echo "  copilot mcp-config.json (codex stays snippet-only)"
 fi
+
+write_copilot_plugin_settings() {
+  [ "$want_copilot" -eq 1 ] || return 0
+  if [ "$write_plugins" -ne 1 ]; then
+    echo "  Copilot marketplaces/plugins not imported — pass --write-plugins to enable"
+    return 0
+  fi
+
+  local marketplaces_file="$plugins_dir/known_marketplaces.json"
+  local claude_settings="$claude_home/settings.json"
+  local copilot_settings="$copilot_dir/settings.json"
+  local marketplaces='{}' plugin_states='{}' plugins='{}' current_settings='{}'
+  local plugin_key install_path enabled tmp_settings marketplace_count plugin_count
+  local manifest manifest_found unsupported_plugins=0
+
+  if [ -s "$marketplaces_file" ]; then
+    if jq -e 'type == "object"' "$marketplaces_file" >/dev/null 2>&1; then
+      marketplaces=$(jq -c '
+        [to_entries[]
+         | .key as $name
+         | .value.source as $source
+         | select(($source | type) == "object")
+         | select(
+             if $source.source == "directory" then
+               ($source.path | type) == "string" and ($source.path | length) > 0
+             elif $source.source == "git" then
+               ($source.url | type) == "string" and ($source.url | length) > 0
+             elif $source.source == "github" then
+               ($source.repo | type) == "string" and ($source.repo | length) > 0
+             else false end)
+         | {key: $name, value: {source: $source}}]
+        | from_entries' "$marketplaces_file" 2>/dev/null) || {
+        echo "  could not read marketplace sources from $marketplaces_file"
+        marketplaces='{}'
+      }
+    else
+      echo "  $marketplaces_file is not valid JSON — no marketplaces imported"
+    fi
+  else
+    echo "  no Claude marketplace list at $marketplaces_file"
+  fi
+
+  if [ -s "$claude_settings" ]; then
+    if jq -e 'type == "object" and ((.enabledPlugins // {}) | type == "object")' \
+      "$claude_settings" >/dev/null 2>&1; then
+      plugin_states=$(jq -c '.enabledPlugins // {}' "$claude_settings")
+    else
+      echo "  $claude_settings is not valid JSON or has invalid enabledPlugins — plugins not imported"
+      return 0
+    fi
+  fi
+
+  if [ -s "$installed_json" ] && jq -e '.plugins | type == "object"' \
+    "$installed_json" >/dev/null 2>&1; then
+    while IFS="$(printf '\t')" read -r plugin_key install_path; do
+      [ -n "$plugin_key" ] && [ -d "$install_path" ] &&
+        [ ! -e "$install_path/.orphaned_at" ] || continue
+      manifest_found=0
+      for manifest in "$install_path/.claude-plugin/plugin.json" "$install_path/plugin.json" \
+        "$install_path/.plugin/plugin.json" "$install_path/.github/plugin/plugin.json"; do
+        if [ -f "$manifest" ] &&
+          jq -e '.name | type == "string" and length > 0' "$manifest" >/dev/null 2>&1; then
+          manifest_found=1
+          break
+        fi
+      done
+      if [ "$manifest_found" -ne 1 ]; then
+        unsupported_plugins=$((unsupported_plugins + 1))
+        continue
+      fi
+      enabled=$(printf '%s' "$plugin_states" |
+        jq -r --arg key "$plugin_key" 'if has($key) then .[$key] else true end')
+      case "$enabled" in
+        true | false) ;;
+        *) echo "  invalid enabledPlugins value for $plugin_key — plugin not imported"; continue ;;
+      esac
+      plugins=$(jq -cn --argjson current "$plugins" --arg key "$plugin_key" \
+        --argjson enabled "$enabled" '$current + {($key): $enabled}')
+    done <<PLUGINLIST
+$(jq -r '.plugins // {} | to_entries[] | .key as $key | .value[]? | [$key, (.installPath // "")] | @tsv' "$installed_json")
+PLUGINLIST
+  elif [ -e "$installed_json" ]; then
+    echo "  $installed_json is not valid plugin JSON — no installed plugins imported"
+  fi
+  [ "$unsupported_plugins" -eq 0 ] ||
+    echo "  skipped $unsupported_plugins plugin(s) without a Copilot-supported plugin manifest; their component links remain available"
+
+  if [ "$(jq -n --argjson marketplaces "$marketplaces" --argjson plugins "$plugins" \
+    '($marketplaces | length) + ($plugins | length)')" -eq 0 ]; then
+    echo "  no Claude marketplaces or installed plugins to import"
+    return 0
+  fi
+
+  if [ -e "$copilot_settings" ]; then
+    if ! jq -e '
+      type == "object"
+      and ((.extraKnownMarketplaces // {}) | type == "object")
+      and ((.enabledPlugins // {}) | type == "object")
+    ' "$copilot_settings" >/dev/null 2>&1; then
+      echo "  $copilot_settings is not valid JSON or has invalid plugin settings — not rewriting it"
+      return 0
+    fi
+    current_settings=$(jq -c '.' "$copilot_settings")
+  fi
+
+  marketplace_count=$(jq -n --argjson add "$marketplaces" --argjson current "$current_settings" \
+    '(($add | keys) - (($current.extraKnownMarketplaces // {}) | keys)) | length')
+  plugin_count=$(jq -n --argjson add "$plugins" --argjson current "$current_settings" \
+    '(($add | keys) - (($current.enabledPlugins // {}) | keys)) | length')
+  if [ "$marketplace_count" -eq 0 ] && [ "$plugin_count" -eq 0 ]; then
+    echo "  Copilot settings already contain the Claude marketplaces and installed plugins"
+    return 0
+  fi
+  if [ "$dry_run" -eq 1 ]; then
+    echo "  would add $marketplace_count marketplace(s) and $plugin_count plugin(s) to $copilot_settings"
+    return 0
+  fi
+
+  mkdir -p "$copilot_dir" || {
+    echo "  could not create $copilot_dir — Copilot plugins not imported"
+    return 0
+  }
+  tmp_settings=$(mktemp "$copilot_dir/.harness-bridge-settings.XXXXXX") || {
+    echo "  could not create a temporary settings file — Copilot plugins not imported"
+    return 0
+  }
+  if if [ -e "$copilot_settings" ]; then
+    jq --argjson add_marketplaces "$marketplaces" --argjson add_plugins "$plugins" '
+      . + {
+        extraKnownMarketplaces: ($add_marketplaces + (.extraKnownMarketplaces // {})),
+        enabledPlugins: ($add_plugins + (.enabledPlugins // {}))
+      }' "$copilot_settings" 2>/dev/null >"$tmp_settings"
+  else
+    printf '{}' | jq --argjson add_marketplaces "$marketplaces" --argjson add_plugins "$plugins" '
+    . + {
+      extraKnownMarketplaces: ($add_marketplaces + (.extraKnownMarketplaces // {})),
+      enabledPlugins: ($add_plugins + (.enabledPlugins // {}))
+    }' >"$tmp_settings" 2>/dev/null
+  fi; then
+    if mv -f "$tmp_settings" "$copilot_settings"; then
+      echo "  added $marketplace_count marketplace(s) and $plugin_count plugin(s) to $copilot_settings"
+      echo "  Copilot CLI will attempt to install compatible enabled plugins when it starts"
+      echo "  existing settings take precedence; incompatible packages remain component-level links"
+    else
+      echo "  could not replace $copilot_settings — Copilot plugins not imported"
+      command -v trash >/dev/null 2>&1 && trash "$tmp_settings" 2>/dev/null
+    fi
+  else
+    echo "  could not write $copilot_settings — Copilot plugins not imported"
+    command -v trash >/dev/null 2>&1 && trash "$tmp_settings" 2>/dev/null
+  fi
+}
+
+write_copilot_plugin_settings
 
 exit 0

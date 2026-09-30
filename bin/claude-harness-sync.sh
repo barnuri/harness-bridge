@@ -36,6 +36,8 @@
 #     ~/.claude/commands/*.md  ->  ~/.config/opencode/command/ + ~/.pi/agent/prompts/
 #                                  + ~/.cursor/commands/ + ~/.codex/prompts/
 #     ~/.claude/CLAUDE.md      ->  ~/.pi/agent/AGENTS.md + ~/.codex/AGENTS.md
+#     ~/.claude/CLAUDE.md      ->  ~/.cursor/rules/claude-global.mdc   (cursor — generated
+#                                  .mdc pointer, see "cursor global instructions" below)
 #     <project>/.claude/agents/*.md    ->  <project>/.opencode/agent/  (cursor reads it natively)
 #     <project>/.claude/commands/*.md  ->  <project>/.opencode/command/ + .pi/prompts/ + .cursor/commands/
 #
@@ -63,7 +65,25 @@
 #   - Hooks / permissions in settings.json: no equivalent concept in any harness.
 #   - Plugin hooks: opencode uses JS plugin handlers, pi uses TS extensions.
 #   - Subagents for pi (no subagent concept) and codex (TOML agents, different schema).
-#   - Cursor user rules: settings UI only, no file to link.
+#   - Cursor user rules set in the IDE settings UI: stored server-side, no file to link.
+#     (The *global rules directory* IS a file surface — see below; only the UI-entered
+#     rules are unreachable.)
+#
+# CURSOR GLOBAL INSTRUCTIONS (verified against cursor-agent 2026.09.02-c22c1a3):
+#   LocalCursorRulesService.loadRulesFromDirAndAncestors walks cwd -> / and, at every
+#   ancestor, loads <dir>/.cursor/rules/**/*.mdc (followSymlinks: true) plus CLAUDE.md,
+#   CLAUDE.local.md and AGENTS.md. So:
+#     - ~/.cursor/rules/*.mdc IS loaded, for any project under $HOME (a repo outside
+#       $HOME never has ~ as an ancestor and will not see it — reported as a caveat).
+#     - ~/.claude/CLAUDE.md is NOT loaded: only a bare CLAUDE.md at an ancestor directory
+#       is, and ~/.claude is not an ancestor of a project. That is the real gap.
+#   A plain symlink cannot close it: a rule is only always-on when its own frontmatter
+#   says alwaysApply: true, and ~/.claude/CLAUDE.md has no frontmatter. So this is the
+#   second generated shim (after the opencode agent shims): ~/.cursor/rules/
+#   claude-global.mdc carries the frontmatter and *points at* the Claude files rather
+#   than copying them, so the instructions can never go stale between runs. Extra files
+#   (e.g. a --append-system-prompt-file passed to Claude Code) are added with
+#   --cursor-append-prompt / $CURSOR_APPEND_PROMPT.
 #
 # Usage:
 #   bin/claude-harness-sync.sh [--dry-run] [--no-prune] [--target all|opencode|pi|codex|cursor]
@@ -81,6 +101,9 @@
 #   PI_AGENT_DIR         default $HOME/.pi/agent
 #   CODEX_HOME_DIR       default $HOME/.codex
 #   CURSOR_CONFIG_DIR    default $HOME/.cursor
+#   CURSOR_APPEND_PROMPT default empty; extra instruction file(s) for the cursor rule
+#                        shim, colon-separated (same content Claude Code gets via
+#                        --append-system-prompt-file)
 
 set -u
 
@@ -92,6 +115,13 @@ opencode_dir="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 pi_dir="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 codex_dir="${CODEX_HOME_DIR:-$HOME/.codex}"
 cursor_dir="${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
+# Colon-separated so a single env var can carry more than one file, matching PATH-style
+# convention; --cursor-append-prompt appends to it.
+cursor_append_prompt="${CURSOR_APPEND_PROMPT:-}"
+# Set once the user has stated an intent this run (a flag, or the env var), which is what
+# distinguishes "no append files wanted" from "nothing said, keep what the rule already has".
+cursor_append_explicit=0
+[ -n "$cursor_append_prompt" ] && cursor_append_explicit=1
 
 dry_run=0
 prune=1
@@ -109,6 +139,7 @@ symlinks only. The Claude Code setup is the source of truth and is never modifie
 
   bin/claude-harness-sync.sh [--dry-run] [--no-prune] [--target all|opencode|pi|codex|cursor]
                                 [--project DIR | --no-project] [--mcp-snippet] [--write-mcp]
+                                [--cursor-append-prompt FILE]
 
 Already auto-detected by a harness, so deliberately NOT linked:
   ~/.claude/skills/ + .claude/skills/  (opencode, cursor)
@@ -121,6 +152,7 @@ Linked, because the harness does not scan them:
   ~/.claude/commands/*.md       ->  ~/.config/opencode/command/ + ~/.pi/agent/prompts/
                                     + ~/.cursor/commands/ + ~/.codex/prompts/
   ~/.claude/CLAUDE.md           ->  ~/.pi/agent/AGENTS.md + ~/.codex/AGENTS.md
+  ~/.claude/CLAUDE.md           ->  ~/.cursor/rules/claude-global.mdc (generated pointer)
   plugin agents/*.md            ->  ~/.config/opencode/agent/ + ~/.cursor/agents/
   <project>/.claude/agents/*.md ->  <project>/.opencode/agent/
   <project>/.claude/commands/*.md -> <project>/.opencode/command/ + .pi/prompts/ + .cursor/commands/
@@ -132,6 +164,12 @@ Linked, because the harness does not scan them:
   --no-project    skip project-level linking entirely
   --mcp-snippet   print per-harness MCP blocks (opencode jsonc, cursor mcp.json, codex TOML)
   --write-mcp     merge MCP servers into opencode.jsonc + cursor mcp.json (codex: snippet only)
+  --cursor-append-prompt FILE
+                  also point the cursor global rule at FILE (repeatable) — use it for the
+                  file Claude Code gets via --append-system-prompt-file. Remembered in the
+                  rule, so later runs keep it without repeating the flag
+  --no-cursor-append-prompt
+                  forget those files and regenerate the rule with CLAUDE.md alone
   --report        compare Claude's own inventory against what each harness loads, then exit
   -h, --help      this message
 
@@ -297,6 +335,16 @@ while [ $# -gt 0 ]; do
     --no-project) no_project=1 ;;
     --mcp-snippet) mcp_snippet=1 ;;
     --write-mcp) write_mcp=1 ;;
+    --cursor-append-prompt)
+      [ $# -ge 2 ] || die "--cursor-append-prompt needs a file"
+      cursor_append_prompt="${cursor_append_prompt:+$cursor_append_prompt:}$2"
+      cursor_append_explicit=1
+      shift
+      ;;
+    --cursor-append-prompt=*)
+      cursor_append_prompt="${cursor_append_prompt:+$cursor_append_prompt:}${1#--cursor-append-prompt=}"
+      ;;
+    --no-cursor-append-prompt) cursor_append_prompt=""; cursor_append_explicit=1 ;;
     --report) report=1 ;;
     -h | --help) usage 0 ;;
     *) printf 'error: unknown argument: %s\n\n' "$1" >&2; usage 1 ;;
@@ -385,6 +433,11 @@ is_owned_link() {
 $source_roots
 EOF
   return 1
+}
+
+# A destination file is a shim of ours iff it carries the marker naming its Claude source.
+is_own_shim() {
+  [ -f "$1" ] && [ ! -L "$1" ] && grep -q "^# $SHIM_MARKER " "$1" 2>/dev/null
 }
 
 # Registers src -> <dir>/<name>, prefixing the name with the plugin when a *different*
@@ -502,6 +555,69 @@ agent_needs_shim() {
   [ "$(translate_agent "$src" | grep -v "^# $SHIM_MARKER")" != "$(cat "$src")" ]
 }
 
+# Cursor's global-rule shim. A rule is only always-on when its OWN frontmatter says so,
+# and ~/.claude/CLAUDE.md has none — so this file cannot be a symlink. It deliberately
+# carries no copy of the instructions either: it names the Claude files and tells the
+# agent to read them, so editing ~/.claude/CLAUDE.md takes effect immediately instead of
+# at the next sync. Regenerated (and pruned) like any other shim.
+render_cursor_rule() {
+  local src="$1" f first=1
+  cat <<MDC
+---
+description: Claude Code global instructions (generated by claude-harness-sync)
+alwaysApply: true
+---
+
+# $SHIM_MARKER $src — edit the source, not this file
+
+Before planning, answering a substantive question, editing a file, or running a command,
+read these instruction files and follow them for the rest of the session. They are listed
+in priority order — an earlier file wins a conflict with a later one.
+
+MDC
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    printf '%s. %s\n' "$first" "$f"
+    first=$((first + 1))
+  done <<FILES
+$(cursor_rule_sources "$src")
+FILES
+  cat <<'MDC'
+
+If a file cannot be read, continue with whichever of the others you could read, and say
+which one was missing.
+MDC
+}
+
+# The rule's targets, in priority order: the append-prompt files first (they are the
+# outermost layer Claude Code itself applies via --append-system-prompt-file), then the
+# global CLAUDE.md. Missing files are dropped rather than listed as broken.
+cursor_rule_sources() {
+  local claude_md="$1" rest="$cursor_append_prompt" one
+  while [ -n "$rest" ]; do
+    one="${rest%%:*}"
+    [ "$one" = "$rest" ] && rest="" || rest="${rest#*:}"
+    [ -n "$one" ] && [ -f "$one" ] && printf '%s\n' "$one"
+  done
+  printf '%s\n' "$claude_md"
+}
+
+# Shim kinds are content-generated rather than linked; each maps to its renderer.
+render_shim() {
+  case "$1" in
+    agent-shim) translate_agent "$2" ;;
+    cursor-rule) render_cursor_rule "$2" ;;
+    *) return 1 ;;
+  esac
+}
+
+is_shim_kind() {
+  case "$1" in
+    agent-shim | cursor-rule) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- Build the plan: plain Claude config opencode does not scan -------------------------
 # Planned BEFORE plugins so that when a plugin ships a command with the same filename, the
 # user's own Claude config keeps the plain name and the plugin's copy gets the prefix. The
@@ -559,6 +675,29 @@ if [ "$want_pi" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
 fi
 if [ "$want_codex" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
   plan_link instructions "claude-user" "$claude_home/CLAUDE.md" "$codex_dir" "AGENTS.md"
+fi
+# The append-prompt paths are remembered in the rule itself. Without this, a sync run from
+# any shell that did not export $CURSOR_APPEND_PROMPT (a non-interactive shell, cron, a hook)
+# would silently regenerate the rule without them — losing instructions the user had wired
+# up, and churning the file for anyone keeping ~/.cursor/rules in git. The generated file is
+# the state; --no-cursor-append-prompt is how you actually clear it.
+if [ "$want_cursor" -eq 1 ] && [ "$cursor_append_explicit" -eq 0 ]; then
+  cursor_prev_rule="$cursor_dir/rules/claude-global.mdc"
+  if is_own_shim "$cursor_prev_rule"; then
+    while IFS= read -r prev_path; do
+      [ -n "$prev_path" ] || continue
+      [ "$prev_path" = "$claude_home/CLAUDE.md" ] && continue
+      cursor_append_prompt="${cursor_append_prompt:+$cursor_append_prompt:}$prev_path"
+    done <<PREV
+$(sed -n 's/^[0-9][0-9]*\. \(\/.*\)$/\1/p' "$cursor_prev_rule" 2>/dev/null)
+PREV
+  fi
+fi
+
+# cursor reads .cursor/rules/*.mdc at every ancestor of the cwd, so one generated rule in
+# $HOME covers every project under it. See the CURSOR GLOBAL INSTRUCTIONS note at the top.
+if [ "$want_cursor" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
+  plan_link cursor-rule "claude-user" "$claude_home/CLAUDE.md" "$cursor_dir/rules" "claude-global.mdc"
 fi
 
 if [ -n "$project_root" ]; then
@@ -716,18 +855,13 @@ done <<EOF
 $(jq -r '.plugins // {} | to_entries[] | .key as $k | .value[]? | [$k, (.installPath // "")] | @tsv' "$installed_json" 2>/dev/null)
 EOF
 
-# A destination file is a shim of ours iff it carries the marker naming its Claude source.
-is_own_shim() {
-  [ -f "$1" ] && [ ! -L "$1" ] && grep -q "^# $SHIM_MARKER " "$1" 2>/dev/null
-}
-
 # --- Apply -----------------------------------------------------------------------------
 while IFS="	" read -r kind src dst; do
   [ -n "$kind" ] || continue
   dst_dir=$(dirname "$dst")
 
   if [ -L "$dst" ]; then
-    if [ "$kind" != "agent-shim" ] && [ "$(readlink "$dst" 2>/dev/null)" = "$src" ]; then
+    if ! is_shim_kind "$kind" && [ "$(readlink "$dst" 2>/dev/null)" = "$src" ]; then
       unchanged=$((unchanged + 1))
       continue
     fi
@@ -743,14 +877,14 @@ while IFS="	" read -r kind src dst; do
   $dst (real file/dir already there — left alone)"
       continue
     fi
-    if [ "$kind" = "agent-shim" ] && [ "$(translate_agent "$src")" = "$(cat "$dst")" ]; then
+    if is_shim_kind "$kind" && [ "$(render_shim "$kind" "$src")" = "$(cat "$dst")" ]; then
       unchanged=$((unchanged + 1))
       continue
     fi
   fi
 
   if [ "$dry_run" -eq 1 ]; then
-    if [ "$kind" = "agent-shim" ]; then
+    if is_shim_kind "$kind"; then
       note "would write shim $kind: $dst (from $src)"
     else
       note "would link $kind: $dst -> $src"
@@ -762,13 +896,20 @@ while IFS="	" read -r kind src dst; do
   mkdir -p "$dst_dir" 2>/dev/null || { conflicts="$conflicts
   $dst_dir (cannot create directory)"; continue; }
 
-  if [ "$kind" = "agent-shim" ]; then
-    # Replace a previous symlink for this agent — opencode rejects the raw Claude file.
+  if is_shim_kind "$kind"; then
+    # Replace a previous symlink for this destination — the raw Claude file is not
+    # loadable there (opencode rejects the agent YAML; cursor ignores a rule with no
+    # alwaysApply frontmatter).
     [ -L "$dst" ] && rm -- "$dst" 2>/dev/null
-    if translate_agent "$src" >"$dst" 2>/dev/null; then
+    if render_shim "$kind" "$src" >"$dst" 2>/dev/null; then
       shimmed=$((shimmed + 1))
-      shims="$shims
+      if [ "$kind" = "cursor-rule" ]; then
+        shims="$shims
+  $dst (from $src) — alwaysApply frontmatter added; points at the Claude files, no copy"
+      else
+        shims="$shims
   $dst (from $src) — tools: rewritten from a YAML list to a map"
+      fi
     else
       conflicts="$conflicts
   $dst (could not write shim)"
@@ -831,6 +972,8 @@ if [ "$prune" -eq 1 ]; then
   if [ "$want_cursor" -eq 1 ]; then
     prune_dir "$cursor_dir/commands"
     prune_dir "$cursor_dir/agents"
+    # Only ever removes a .mdc carrying our marker — hand-written user rules stay.
+    prune_dir "$cursor_dir/rules"
   fi
   [ "$want_codex" -eq 1 ] && prune_dir "$codex_dir/prompts"
   if [ -n "$project_root" ]; then
@@ -848,16 +991,17 @@ count_kind() { grep -c "^$1	" "$plan_file" 2>/dev/null | tr -d ' '; }
 
 echo
 [ "$dry_run" -eq 1 ] && echo "DRY RUN — nothing was changed"
-printf 'planned: %s skills, %s opencode commands, %s pi prompts, %s opencode agents, %s cursor commands, %s cursor agents, %s codex prompts\n' \
+printf 'planned: %s skills, %s opencode commands, %s pi prompts, %s opencode agents, %s cursor commands, %s cursor agents, %s cursor rules, %s codex prompts\n' \
   "$(count_kind skill)" "$(count_kind command)" "$(count_kind prompt)" "$(count_kind agent)" \
-  "$(count_kind cursor-command)" "$(count_kind cursor-agent)" "$(count_kind codex-prompt)"
+  "$(count_kind cursor-command)" "$(count_kind cursor-agent)" "$(count_kind cursor-rule)" \
+  "$(count_kind codex-prompt)"
 verb="applied"
 [ "$dry_run" -eq 1 ] && verb="would apply"
 printf '%s: %s linked, %s shimmed, %s already current, %s stale entries pruned, %s plugin entries skipped\n' \
   "$verb" "$linked" "$shimmed" "$unchanged" "$pruned" "$skipped_plugins"
 printf 'targets: skills -> %s (opencode + pi + codex + cursor all scan it)\n' "$agents_skills_dir"
 
-[ -n "$shims" ] && printf '\ncompatibility shims (symlink impossible — opencode hard-fails on Claude'"'"'s YAML list\nform for agent tools, so these are regenerated from the Claude source on every run):%s\n' "$shims"
+[ -n "$shims" ] && printf '\ncompatibility shims (symlink impossible — opencode hard-fails on Claude'"'"'s YAML list\nform for agent tools, and a cursor rule is only always-on when its own frontmatter says\nso; regenerated from the Claude source on every run):%s\n' "$shims"
 [ -n "$shadowed" ] && printf '\nnot linked — opencode already sees an equally-named skill in ~/.claude/skills,\nso linking the plugin copy would duplicate it:%s\n' "$shadowed"
 [ -n "$collisions" ] && printf '\nname collisions (prefixed with the plugin name):%s\n' "$collisions"
 [ -n "$conflicts" ] && printf '\nleft alone (not ours to touch):%s\n' "$conflicts"
@@ -887,7 +1031,7 @@ echo "not migrated (no linkable equivalent):"
 [ -n "$hook_plugins" ] && echo "  hooks:$hook_plugins — opencode uses JS plugin handlers, pi uses TS extensions; codex/cursor have no plugin-hook concept"
 [ -n "$mcp_plugins" ] && echo "  .mcp.json servers:$mcp_plugins — see --mcp-snippet / --write-mcp; pi has no MCP support"
 echo "  subagents for pi (no subagent concept) and codex (TOML agents with a different schema — a symlink cannot convert them)"
-echo "  cursor user rules — settings UI only, no file to link"
+echo "  cursor user rules entered in the IDE settings UI — stored server-side, no file to link"
 echo "  codex project-level CLAUDE.md — opt in via project_doc_fallback_filenames in ~/.codex/config.toml (a config change, not a link)"
 echo "  settings.json hooks/permissions — no equivalent concept in any harness"
 if [ "$want_cursor" -eq 1 ]; then
@@ -895,6 +1039,18 @@ if [ "$want_cursor" -eq 1 ]; then
   echo "cursor caveat: cursor-agent (CLI) has a known partial symlink-discovery bug — links whose"
   echo "  TARGETS live outside .cursor/ or .claude/ (e.g. a directory-source marketplace checkout)"
   echo "  may be missed by the CLI while the IDE (2.5+) sees them. Verify with cursor-agent once."
+  if [ -f "$claude_home/CLAUDE.md" ]; then
+    echo "cursor global rule: ~/.cursor/rules/*.mdc is read at every ancestor of the cwd, so the"
+    echo "  generated claude-global.mdc only reaches projects UNDER \$HOME. A repo elsewhere needs"
+    echo "  its own <repo>/.cursor/rules/ copy."
+    if [ -n "$cursor_append_prompt" ]; then
+      printf '  rule points at: %s\n' \
+        "$(cursor_rule_sources "$claude_home/CLAUDE.md" | tr '\n' ' ')"
+    else
+      echo "  rule points at ~/.claude/CLAUDE.md only — add --cursor-append-prompt FILE (or set"
+      echo "  \$CURSOR_APPEND_PROMPT) to include what Claude Code gets via --append-system-prompt-file"
+    fi
+  fi
 fi
 
 # --- MCP: the one thing a symlink genuinely cannot do -----------------------------------

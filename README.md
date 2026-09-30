@@ -1,8 +1,8 @@
-# claude-harness-sync
+# harness-bridge
 
 Use your existing **Claude Code** setup — plugins, skills, subagents, slash commands, MCP
-servers, `CLAUDE.md` — from **opencode**, **pi**, **codex**, and **cursor**, without
-duplicating a single file.
+servers, `CLAUDE.md` — from **opencode**, **pi**, **codex**, **cursor**, and **GitHub
+Copilot CLI**, without duplicating a single file.
 
 Your Claude Code setup is the source of truth. Nothing under `~/.claude` is ever modified.
 
@@ -11,19 +11,19 @@ Your Claude Code setup is the source of truth. Nothing under `~/.claude` is ever
 What each supported harness gets from your Claude Code setup, and how. Keep this table
 updated whenever harness support changes (see `CLAUDE.md`).
 
-| Claude resource | opencode | pi | codex | cursor |
-|---|---|---|---|---|
-| **Plugin skills** | ✅ link → `~/.agents/skills/` | ✅ same link | ✅ same link (documented symlink support) | ✅ same link ⚠ CLI caveat below |
-| **Plain `~/.claude/skills/`** | ✅ auto-scanned | — not scanned | — not scanned | ✅ auto-scanned (compat dir) |
-| **Plugin subagents** (`agents/*.md`) | ✅ link/shim → `~/.config/opencode/agent/` | — no subagent concept | — TOML agents, different schema | ✅ link → `~/.cursor/agents/` (reads Claude markdown as-is) |
-| **Plain `~/.claude/agents/`** | ✅ link/shim | — | — | ✅ auto-scanned (compat dir) |
-| **Slash commands** (`commands/*.md`) | ✅ link → `command/` | ✅ link → `prompts/` | ✅ link → `~/.codex/prompts/` (deprecated surface, still loaded) | ✅ link → `~/.cursor/commands/` |
-| **Global `~/.claude/CLAUDE.md`** | ✅ read natively | ✅ link → `~/.pi/agent/AGENTS.md` | ✅ link → `~/.codex/AGENTS.md` | 🟡 shim → `~/.cursor/rules/claude-global.mdc` (always-on rule pointing at it; projects under `$HOME` only) |
-| **Project `CLAUDE.md`** | ✅ read natively | — | — opt-in via `project_doc_fallback_filenames` in `config.toml` | ✅ CLI reads it natively |
-| **MCP servers** | ✅ `--write-mcp` → `opencode.jsonc` (translated) | — no MCP support | 🟡 `--mcp-snippet` prints TOML to paste | ✅ `--write-mcp` → `~/.cursor/mcp.json` (same schema as Claude) |
-| **Saved dynamic workflows** (plugin `workflows/*.js`, `~/.claude/workflows/`, `.claude/workflows/`) | — no Workflow runtime | — | — | — |
-| **Hooks / permissions** | — | — | — | — |
-| **Coverage** | **8/10 (80%)** | **3/10 (30%)** | **3.5/10 (35%)** | **7.5/10 (75%)** |
+| Claude resource | opencode | pi | codex | cursor | copilot |
+|---|---|---|---|---|---|
+| **Plugin skills** | ✅ link → `~/.agents/skills/` | ✅ same link | ✅ same link (documented symlink support) | ✅ same link ⚠ CLI caveat below | ✅ same link (also auto-scanned) |
+| **Plain `~/.claude/skills/`** | ✅ auto-scanned | — not scanned | — not scanned | ✅ auto-scanned (compat dir) | — not scanned (project `.claude/skills` is, though) |
+| **Plugin subagents** (`agents/*.md`) | ✅ link/shim → `~/.config/opencode/agent/` | — no subagent concept | — TOML agents, different schema | ✅ link → `~/.cursor/agents/` (reads Claude markdown as-is) | ✅ link → `~/.copilot/agents/` (reads Claude markdown as-is) |
+| **Plain `~/.claude/agents/`** | ✅ link/shim | — | — | ✅ auto-scanned (compat dir) | ✅ link → `~/.copilot/agents/` (not auto-scanned) |
+| **Slash commands** (`commands/*.md`) | ✅ link → `command/` | ✅ link → `prompts/` | ✅ link → `~/.codex/prompts/` (deprecated surface, still loaded) | ✅ link → `~/.cursor/commands/` | — no custom command/prompt-file surface |
+| **Global `~/.claude/CLAUDE.md`** | ✅ read natively | ✅ link → `~/.pi/agent/AGENTS.md` | ✅ link → `~/.codex/AGENTS.md` | 🟡 shim → `~/.cursor/rules/claude-global.mdc` (always-on rule pointing at it; projects under `$HOME` only) | ✅ link → `~/.copilot/copilot-instructions.md` |
+| **Project `CLAUDE.md`** | ✅ read natively | — | — opt-in via `project_doc_fallback_filenames` in `config.toml` | ✅ CLI reads it natively | ✅ CLI reads it natively (git root & cwd) |
+| **MCP servers** | ✅ `--write-mcp` → `opencode.jsonc` (translated) | — no MCP support | 🟡 `--mcp-snippet` prints TOML to paste | ✅ `--write-mcp` → `~/.cursor/mcp.json` (same schema as Claude) | ✅ `--write-mcp` → `~/.copilot/mcp-config.json` (translated) |
+| **Saved dynamic workflows** (plugin `workflows/*.js`, `~/.claude/workflows/`, `.claude/workflows/`) | — no Workflow runtime | — | — | — | — |
+| **Hooks / permissions** | — | — | — | — | — (own hooks system, different mechanism) |
+| **Coverage** | **8/10 (80%)** | **3/10 (30%)** | **3.5/10 (35%)** | **7.5/10 (75%)** | **6/10 (60%)** |
 
 Coverage counts the 10 resource rows above: ✅ = 1, 🟡 (manual paste step) = 0.5, — = 0.
 No harness can reach 100% — Claude's dynamic-workflow runtime (`agent()`/`pipeline()`
@@ -40,19 +40,19 @@ checkout) may be missed by the CLI while the IDE (2.5+) sees them. Verify once w
 cursor-agent after syncing.
 
 ```bash
-bin/claude-harness-sync.sh --report     # what's shared, what's missing
-bin/claude-harness-sync.sh --dry-run    # what it would do
-bin/claude-harness-sync.sh --write-mcp  # do it, including MCP servers
+bin/harness-bridge.sh --report     # what's shared, what's missing
+bin/harness-bridge.sh --dry-run    # what it would do
+bin/harness-bridge.sh --write-mcp  # do it, including MCP servers
 
 # give cursor the same global instructions Claude Code runs with
-bin/claude-harness-sync.sh --cursor-append-prompt ~/path/to/append-to-system-prompt.md
+bin/harness-bridge.sh --cursor-append-prompt ~/path/to/append-to-system-prompt.md
 ```
 
 ## Why
 
 None of these harnesses understands Claude Code plugins, so everything in
-`~/.claude/plugins/cache/` is invisible to them. But all four implement the
-[Agent Skills standard](https://agentskills.io) and all four scan the harness-neutral
+`~/.claude/plugins/cache/` is invisible to them. But all five implement the
+[Agent Skills standard](https://agentskills.io) and all five scan the harness-neutral
 `~/.agents/skills/`, so one symlink can serve every tool.
 
 **The rule: link only the gaps.** Anything a harness already discovers on its own is left
@@ -61,36 +61,39 @@ completely alone — linking it again would give you two entries for one resourc
 ## What is already automatic (never linked)
 
 Verified against opencode 1.18.11 with `opencode debug skill` / `opencode debug config`;
-cursor's compat dirs are documented at cursor.com/docs/skills:
+cursor's compat dirs are documented at cursor.com/docs/skills; copilot CLI's are documented
+at docs.github.com/copilot/how-tos/copilot-cli/customize-copilot:
 
 | Claude resource | Auto-detected by | Action |
 |---|---|---|
-| `~/.claude/skills/`, `.claude/skills/` | opencode, cursor | none |
-| `~/.claude/CLAUDE.md`, `./CLAUDE.md` | opencode (both), cursor CLI (project) | none |
-| `~/.claude/agents/`, `.claude/agents/` | cursor | none (still linked for opencode) |
+| `~/.claude/skills/`, `.claude/skills/` | opencode, cursor; copilot (project `.claude/skills` only, not the global path) | none |
+| `~/.claude/CLAUDE.md`, `./CLAUDE.md` | opencode (both), cursor CLI (project), copilot CLI (project) | none |
+| `~/.claude/agents/`, `.claude/agents/` | cursor | none (still linked for opencode and copilot) |
 
 opencode's instruction-file list is a literal in the binary — `[config/AGENTS.md,
 ~/.claude/CLAUDE.md]` globally and `["AGENTS.md","CLAUDE.md","CONTEXT.md"]` walking up from
-the cwd — so `CLAUDE.md` needs no shim at all. pi and codex do *not* read it, so the global
-`CLAUDE.md` is linked to `~/.pi/agent/AGENTS.md` and `~/.codex/AGENTS.md`.
+the cwd — so `CLAUDE.md` needs no shim at all. pi, codex, and copilot CLI do *not* read the
+global one, so it is linked to `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md`, and
+`~/.copilot/copilot-instructions.md`.
 
 ## What gets linked
 
 | Source | Destination | Used by |
 |---|---|---|
-| plugin `skills/<name>/` | `~/.agents/skills/<name>` | opencode + pi + codex + cursor |
-| plugin `agents/*.md` | `~/.config/opencode/agent/`, `~/.cursor/agents/` | opencode, cursor |
+| plugin `skills/<name>/` | `~/.agents/skills/<name>` | opencode + pi + codex + cursor + copilot |
+| plugin `agents/*.md` | `~/.config/opencode/agent/`, `~/.cursor/agents/`, `~/.copilot/agents/` | opencode, cursor, copilot |
 | plugin `commands/*.md` | `~/.config/opencode/command/`, `~/.pi/agent/prompts/`, `~/.cursor/commands/`, `~/.codex/prompts/` | opencode, pi, cursor, codex |
-| `~/.claude/agents/*.md` | `~/.config/opencode/agent/` | opencode (cursor reads the source natively) |
+| `~/.claude/agents/*.md` | `~/.config/opencode/agent/`, `~/.copilot/agents/` | opencode, copilot (cursor reads the source natively) |
 | `~/.claude/commands/*.md` | same four command/prompt dirs as plugin commands | opencode, pi, cursor, codex |
-| `<project>/.claude/agents/*.md` | `<project>/.opencode/agent/` | opencode (cursor reads the source natively) |
+| `<project>/.claude/agents/*.md` | `<project>/.opencode/agent/`, `<project>/.github/agents/` | opencode, copilot (cursor reads the source natively) |
 | `<project>/.claude/commands/*.md` | `<project>/.opencode/command/`, `<project>/.pi/prompts/`, `<project>/.cursor/commands/` | opencode, pi, cursor |
-| `~/.claude/CLAUDE.md` | `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md` | pi, codex |
+| `~/.claude/CLAUDE.md` | `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md`, `~/.copilot/copilot-instructions.md` | pi, codex, copilot |
 | `~/.claude/CLAUDE.md` | `~/.cursor/rules/claude-global.mdc` (generated pointer, not a link) | cursor |
 
 Whole skill *directories* are linked, not just `SKILL.md`, so bundled scripts and
-references resolve. All four harnesses follow symlinked skill directories (see the cursor
-CLI caveat above).
+references resolve. All five harnesses follow symlinked skill directories (see the cursor
+CLI caveat above). copilot CLI has no user-definable slash-command/prompt-file surface at
+all, so Claude's `commands/*.md` are reported as not migrated for it rather than linked.
 
 ## The three places a symlink cannot work
 
@@ -99,7 +102,7 @@ CLI caveat above).
    `tools:` as a YAML sequence (`- Bash`) where opencode wants a mapping (`Bash: true`),
    and uses colour names (`color: red`) where opencode allows only `#rrggbb` or its theme
    enum. Those agents get the smallest possible shim: the same file with only those two
-   keys reshaped, marked `# generated by claude-harness-sync.sh from <src>` and
+   keys reshaped, marked `# generated by harness-bridge.sh from <src>` and
    regenerated from the Claude source on every run. Agents opencode already accepts stay
    plain symlinks.
 
@@ -131,6 +134,9 @@ CLI caveat above).
      `--write-mcp` merges the servers near-verbatim.
    - **codex** — `~/.codex/config.toml` is TOML and routinely hand-commented, so it is
      never machine-edited: `--mcp-snippet` prints the `[mcp_servers.*]` block to paste.
+   - **copilot CLI** — `~/.copilot/mcp-config.json` requires a `type` key (`local`/`http`/
+     `sse`) and a `tools` array that Claude's shape doesn't have, so `--write-mcp` merges
+     a translation (`tools` defaults to `["*"]`, everything allowed).
    - **pi** — no MCP support.
 
 Not bridgeable at all: saved dynamic workflows (the `Workflow` runtime executing plugin
@@ -207,7 +213,7 @@ commands as "Skills" while they arrive downstream as opencode commands.
 
 ```jsonc
 // ~/.config/opencode/opencode.jsonc
-{ "plugin": ["file:///absolute/path/to/claude-harness-sync/src/plugin.js"] }
+{ "plugin": ["file:///absolute/path/to/harness-bridge/src/plugin.js"] }
 ```
 
 opencode reads its config once at startup, so links created during a run are picked up on
@@ -222,11 +228,12 @@ so removal stays recoverable). Optional: `claude` for `--report`, `opencode`/`pi
 ## Tests
 
 ```bash
-bash test/claude-harness-sync.test.sh   # 136 assertions, throwaway fixture HOME
+bash test/harness-bridge.test.sh   # 159 assertions, throwaway fixture HOME
 ```
 
 Every case runs against a temporary `HOME`; the suite never reads or writes the real
-`~/.claude`, `~/.config/opencode`, `~/.pi`, `~/.codex`, `~/.cursor`, or `~/.agents`.
+`~/.claude`, `~/.config/opencode`, `~/.pi`, `~/.codex`, `~/.cursor`, `~/.copilot`, or
+`~/.agents`.
 
 ## Licence
 

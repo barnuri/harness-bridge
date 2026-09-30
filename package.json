@@ -1,17 +1,17 @@
 {
-  "name": "claude-harness-sync",
+  "name": "harness-bridge",
   "version": "0.1.0",
-  "description": "Use your Claude Code setup (plugins, skills, agents, commands, MCP) from opencode and pi — via symlinks, without duplicating files",
+  "description": "Bridge Claude Code, opencode, pi, codex, cursor, and GitHub Copilot CLI setups (plugins, skills, agents, commands, MCP) to each other — via symlinks, without duplicating files",
   "type": "module",
   "main": "src/plugin.js",
   "exports": { ".": "./src/plugin.js" },
   "files": ["bin", "src", "README.md", "LICENSE"],
   "scripts": {
-    "test": "bash test/claude-harness-sync.test.sh",
-    "sync": "bash bin/claude-harness-sync.sh",
-    "report": "bash bin/claude-harness-sync.sh --report"
+    "test": "bash test/harness-bridge.test.sh",
+    "sync": "bash bin/harness-bridge.sh",
+    "report": "bash bin/harness-bridge.sh --report"
   },
-  "keywords": ["claude-code", "opencode", "pi", "agent-skills", "mcp", "symlink", "sync"],
+  "keywords": ["claude-code", "opencode", "pi", "codex", "cursor", "copilot-cli", "agent-skills", "mcp", "symlink", "sync"],
   "license": "MIT",
   "peerDependencies": { "@opencode-ai/plugin": ">=1.18.0" },
   "peerDependenciesMeta": { "@opencode-ai/plugin": { "optional": true } }

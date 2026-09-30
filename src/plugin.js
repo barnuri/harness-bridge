@@ -1,12 +1,12 @@
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "claude-harness-sync.sh")
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "harness-bridge.sh")
 
 const DEFAULT_ARGS = ["--no-project", "--write-mcp"]
 
 /**
- * opencode plugin wrapper around bin/claude-harness-sync.sh.
+ * opencode plugin wrapper around bin/harness-bridge.sh.
  *
  * It deliberately shells out to the script rather than reimplementing the logic in JS:
  * the script is the single source of truth, it is covered by the test suite, and it stays
@@ -18,7 +18,7 @@ const DEFAULT_ARGS = ["--no-project", "--write-mcp"]
  * pay the one-launch lag right after installing or updating a Claude plugin.
  *
  * Configure in opencode.jsonc:
- *   { "plugin": ["file:///abs/path/to/claude-harness-sync/src/plugin.js"] }
+ *   { "plugin": ["file:///abs/path/to/harness-bridge/src/plugin.js"] }
  * or with options:
  *   { "plugin": [["file:///.../src/plugin.js", { "args": ["--no-project"] }]] }
  */

@@ -1,4 +1,4 @@
-# claude-harness-sync — Repo Notes
+# harness-bridge — Repo Notes
 
 ## Keep the README Compatibility table current
 
@@ -18,10 +18,10 @@ When adding a new harness:
    whether it follows symlinked directories, its instructions-file names, its MCP config
    shape). Wrong destination paths are the costly failure here — the engine will happily
    create links nothing ever reads.
-2. Follow the existing pattern in `bin/claude-harness-sync.sh`: a `want_<harness>` flag, a
+2. Follow the existing pattern in `bin/harness-bridge.sh`: a `want_<harness>` flag, a
    `--target` value, an env-overridable destination dir (needed for test isolation), plan
    rules, prune dirs, usage/header text.
-3. Add test cases to `test/claude-harness-sync.test.sh` (fixture-`HOME` isolated) and run
+3. Add test cases to `test/harness-bridge.test.sh` (fixture-`HOME` isolated) and run
    the suite.
 4. Update the Compatibility table, the "What gets linked" table, and the assertion count
    in the Tests section of `README.md`.

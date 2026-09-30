@@ -2,10 +2,10 @@
 # Make an existing Claude Code setup usable from the opencode, pi, codex, cursor, and
 # GitHub Copilot CLI coding harnesses, without ever duplicating a file.
 #
-# THE RULE: the Claude Code setup is the source of truth. Anything the other harness
-# already discovers on its own is left completely alone — linking it again would give the
-# user two entries for one resource. Only the gaps get a symlink, and nothing under
-# ~/.claude is ever modified.
+# THE RULE: the Claude Code setup is the default source of truth. A generic global
+# instruction bundle may provide shared, append, and harness-specific instruction files.
+# Anything a harness already discovers is left alone unless the bundle needs an additional
+# native pointer. Nothing under ~/.claude is ever modified.
 #
 # What opencode discovers by itself (verified against this binary, v1.18.11 — re-check
 # after an upgrade with `opencode debug skill` / `opencode debug config`):
@@ -37,11 +37,8 @@
 #     ~/.claude/agents/*.md    ->  ~/.copilot/agents/                  (copilot CLI — only ~/.copilot/agents is scanned, not ~/.claude/agents)
 #     ~/.claude/commands/*.md  ->  ~/.config/opencode/command/ + ~/.pi/agent/prompts/
 #                                  + ~/.cursor/commands/ + ~/.codex/prompts/
-#     ~/.claude/CLAUDE.md      ->  ~/.pi/agent/AGENTS.md + ~/.codex/AGENTS.md
-#     ~/.claude/CLAUDE.md      ->  ~/.cursor/rules/claude-global.mdc   (cursor — generated
-#                                  .mdc pointer, see "cursor global instructions" below)
-#     ~/.claude/CLAUDE.md      ->  ~/.copilot/copilot-instructions.md  (copilot CLI — its
-#                                  global instructions file; it does not read ~/.claude/CLAUDE.md)
+#     global instruction bundle -> native global files for opencode, pi, codex, cursor,
+#                                  and copilot; falls back to ~/.claude/CLAUDE.md links
 #     <project>/.claude/agents/*.md    ->  <project>/.opencode/agent/  (cursor reads it natively)
 #     <project>/.claude/agents/*.md    ->  <project>/.github/agents/   (copilot CLI — project custom agents dir)
 #     <project>/.claude/commands/*.md  ->  <project>/.opencode/command/ + .pi/prompts/ + .cursor/commands/
@@ -97,7 +94,8 @@
 #   A plain symlink cannot close it: a rule is only always-on when its own frontmatter
 #   says alwaysApply: true, and ~/.claude/CLAUDE.md has no frontmatter. So this is the
 #   second generated shim (after the opencode agent shims): ~/.cursor/rules/
-#   claude-global.mdc carries the frontmatter and *points at* the Claude files rather
+#   claude-global.mdc carries the frontmatter and points at the selected global instruction
+#   sources rather
 #   than copying them, so the instructions can never go stale between runs. Extra files
 #   (e.g. a --append-system-prompt-file passed to Claude Code) are added with
 #   --cursor-append-prompt / $CURSOR_APPEND_PROMPT.
@@ -144,8 +142,81 @@
 #                        shim, colon-separated (same content Claude Code gets via
 #                        --append-system-prompt-file)
 #   COPILOT_CONFIG_DIR   default $HOME/.copilot
+#   HARNESS_GLOBAL_INSTRUCTIONS_DIR
+#                        optional bundle containing shared.md, append.md, and
+#                        harness-specific files such as copilot.md or cursor.md
+#   HARNESS_BRIDGE_ENV_FILE
+#                        optional dotenv file containing persistent bridge options
 
 set -u
+
+die() {
+  printf 'error: %s\n' "$1" >&2
+  exit 1
+}
+
+env_flag() {
+  local name="$1" default="$2" value
+  eval "value=\${$name:-}"
+  [ -n "$value" ] || { printf '%s\n' "$default"; return; }
+  case "$value" in
+    1 | true | TRUE | yes | YES | on | ON) printf '1\n' ;;
+    0 | false | FALSE | no | NO | off | OFF) printf '0\n' ;;
+    *) die "$name must be true or false (got '$value')" ;;
+  esac
+}
+
+load_env_file() {
+  local file="$1" file_dir line key value
+  [ -f "$file" ] || die "env file not found: $file"
+  file_dir=$(unset CDPATH; cd -P -- "$(dirname "$file")" 2>/dev/null && pwd) ||
+    die "cannot resolve env file directory: $file"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -n "$line" ] || continue
+    case "$line" in \#*) continue ;; esac
+    case "$line" in export\ *) line="${line#export }" ;; esac
+    case "$line" in *=*) ;; *) die "invalid env line in $file: $line" ;; esac
+    key=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+    value=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//')
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    case "$key" in
+      HARNESS_GLOBAL_INSTRUCTIONS_DIR | CURSOR_APPEND_PROMPT | \
+      HARNESS_BRIDGE_TARGET | HARNESS_BRIDGE_PROJECT | HARNESS_BRIDGE_DRY_RUN | \
+      HARNESS_BRIDGE_NO_PRUNE | HARNESS_BRIDGE_FORCE | HARNESS_BRIDGE_NO_PROJECT | \
+      HARNESS_BRIDGE_MCP_SNIPPET | HARNESS_BRIDGE_WRITE_MCP | \
+      HARNESS_BRIDGE_NO_CURSOR_APPEND_PROMPT)
+        if [ "$key" = "HARNESS_GLOBAL_INSTRUCTIONS_DIR" ]; then
+          case "$value" in /*) ;; *) value="$file_dir/$value" ;; esac
+        fi
+        printf -v "$key" '%s' "$value"
+        ;;
+      *) die "unsupported option in $file: $key" ;;
+    esac
+  done <"$file"
+}
+
+env_file="${HARNESS_BRIDGE_ENV_FILE:-}"
+scan_expect_env_file=0
+for scan_arg in "$@"; do
+  if [ "$scan_expect_env_file" -eq 1 ]; then
+    env_file="$scan_arg"
+    scan_expect_env_file=0
+    continue
+  fi
+  case "$scan_arg" in
+    --env-file) scan_expect_env_file=1 ;;
+    --env-file=*) env_file="${scan_arg#--env-file=}" ;;
+  esac
+done
+[ "$scan_expect_env_file" -eq 0 ] || die "--env-file needs a file"
+if [ -z "$env_file" ] && [ -f "$PWD/.harness-bridge.env" ]; then
+  env_file="$PWD/.harness-bridge.env"
+fi
+[ -z "$env_file" ] || load_env_file "$env_file"
 
 claude_home="${CLAUDE_HOME_DIR:-$HOME/.claude}"
 plugins_dir="${CLAUDE_PLUGINS_DIR:-$claude_home/plugins}"
@@ -156,6 +227,9 @@ pi_dir="${PI_AGENT_DIR:-$HOME/.pi/agent}"
 codex_dir="${CODEX_HOME_DIR:-$HOME/.codex}"
 cursor_dir="${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
 copilot_dir="${COPILOT_CONFIG_DIR:-$HOME/.copilot}"
+global_instructions_dir="${HARNESS_GLOBAL_INSTRUCTIONS_DIR:-}"
+global_instructions_explicit=0
+[ -n "$global_instructions_dir" ] && global_instructions_explicit=1
 # Colon-separated so a single env var can carry more than one file, matching PATH-style
 # convention; --cursor-append-prompt appends to it.
 cursor_append_prompt="${CURSOR_APPEND_PROMPT:-}"
@@ -164,24 +238,31 @@ cursor_append_prompt="${CURSOR_APPEND_PROMPT:-}"
 cursor_append_explicit=0
 [ -n "$cursor_append_prompt" ] && cursor_append_explicit=1
 
-dry_run=0
+dry_run=$(env_flag HARNESS_BRIDGE_DRY_RUN 0)
 prune=1
-force=0
-target="all"
-project_root=""
-no_project=0
-mcp_snippet=0
-write_mcp=0
+[ "$(env_flag HARNESS_BRIDGE_NO_PRUNE 0)" -eq 1 ] && prune=0
+force=$(env_flag HARNESS_BRIDGE_FORCE 0)
+target="${HARNESS_BRIDGE_TARGET:-all}"
+project_root="${HARNESS_BRIDGE_PROJECT:-}"
+no_project=$(env_flag HARNESS_BRIDGE_NO_PROJECT 0)
+mcp_snippet=$(env_flag HARNESS_BRIDGE_MCP_SNIPPET 0)
+write_mcp=$(env_flag HARNESS_BRIDGE_WRITE_MCP 0)
 report=0
+[ "$(env_flag HARNESS_BRIDGE_NO_CURSOR_APPEND_PROMPT 0)" -eq 1 ] && {
+  cursor_append_prompt=""
+  cursor_append_explicit=1
+}
 
 usage() {
   cat <<'USAGE'
 Make an existing Claude Code setup usable from opencode, pi, codex, cursor, and GitHub
-Copilot CLI, using symlinks only. The Claude Code setup is the source of truth and is
-never modified.
+Copilot CLI. Claude is the default source of truth; an optional generic global instruction
+bundle can provide shared and harness-specific files. The Claude setup is never modified.
 
   bin/harness-bridge.sh [--dry-run] [--no-prune] [--force] [--target all|opencode|pi|codex|cursor|copilot]
                                 [--project DIR | --no-project] [--mcp-snippet] [--write-mcp]
+                                [--env-file FILE]
+                                [--global-instructions-dir DIR]
                                 [--cursor-append-prompt FILE]
 
 Already auto-detected by a harness, so deliberately NOT linked:
@@ -196,9 +277,10 @@ Linked, because the harness does not scan them:
   ~/.claude/agents/*.md         ->  ~/.config/opencode/agent/ + ~/.copilot/agents/
   ~/.claude/commands/*.md       ->  ~/.config/opencode/command/ + ~/.pi/agent/prompts/
                                     + ~/.cursor/commands/ + ~/.codex/prompts/
-  ~/.claude/CLAUDE.md           ->  ~/.pi/agent/AGENTS.md + ~/.codex/AGENTS.md
+  global instruction bundle     ->  native global files for every selected harness
+  ~/.claude/CLAUDE.md fallback  ->  ~/.pi/agent/AGENTS.md + ~/.codex/AGENTS.md
                                     + ~/.copilot/copilot-instructions.md
-  ~/.claude/CLAUDE.md           ->  ~/.cursor/rules/claude-global.mdc (generated pointer)
+  ~/.claude/CLAUDE.md fallback  ->  ~/.cursor/rules/claude-global.mdc (generated pointer)
   plugin agents/*.md            ->  ~/.config/opencode/agent/ + ~/.cursor/agents/
                                     + ~/.copilot/agents/
   <project>/.claude/agents/*.md ->  <project>/.opencode/agent/ + <project>/.github/agents/
@@ -218,12 +300,18 @@ Linked, because the harness does not scan them:
                   copilot mcp-config.json)
   --write-mcp     merge MCP servers into opencode.jsonc + cursor mcp.json + copilot
                   mcp-config.json (codex: snippet only)
+  --env-file FILE load persistent options from a dotenv file. CLI arguments override it;
+                  defaults to $HARNESS_BRIDGE_ENV_FILE, then ./.harness-bridge.env
+  --global-instructions-dir DIR
+                  use a generic instruction bundle containing shared.md, optional
+                  append.md, and optional <harness>.md files. When omitted, a bundle is
+                  autodetected if ~/.claude/CLAUDE.md resolves to a file named shared.md
   --cursor-append-prompt FILE
                   also point the cursor global rule at FILE (repeatable) — use it for the
                   file Claude Code gets via --append-system-prompt-file. Remembered in the
                   rule, so later runs keep it without repeating the flag
   --no-cursor-append-prompt
-                  forget those files and regenerate the rule with CLAUDE.md alone
+                  forget extra Cursor append files; a bundle's append.md remains active
   --report        compare Claude's own inventory against what each harness loads, then exit
   -h, --help      this message
 
@@ -234,9 +322,22 @@ USAGE
   exit "${1:-0}"
 }
 
-die() {
-  printf 'error: %s\n' "$1" >&2
-  exit 1
+resolve_path() {
+  local path="$1" target dir
+  [ -e "$path" ] || [ -L "$path" ] || return 1
+  case "$path" in
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  while [ -L "$path" ]; do
+    target=$(readlink "$path") || return 1
+    case "$target" in
+      /*) path="$target" ;;
+      *) path="$(dirname "$path")/$target" ;;
+    esac
+  done
+  dir=$(unset CDPATH; cd -P -- "$(dirname "$path")" 2>/dev/null && pwd) || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$path")"
 }
 
 # --- Verification report ----------------------------------------------------------------
@@ -391,6 +492,21 @@ while [ $# -gt 0 ]; do
     --no-project) no_project=1 ;;
     --mcp-snippet) mcp_snippet=1 ;;
     --write-mcp) write_mcp=1 ;;
+    --env-file)
+      [ $# -ge 2 ] || die "--env-file needs a file"
+      shift
+      ;;
+    --env-file=*) ;;
+    --global-instructions-dir)
+      [ $# -ge 2 ] || die "--global-instructions-dir needs a directory"
+      global_instructions_dir="$2"
+      global_instructions_explicit=1
+      shift
+      ;;
+    --global-instructions-dir=*)
+      global_instructions_dir="${1#--global-instructions-dir=}"
+      global_instructions_explicit=1
+      ;;
     --cursor-append-prompt)
       [ $# -ge 2 ] || die "--cursor-append-prompt needs a file"
       cursor_append_prompt="${cursor_append_prompt:+$cursor_append_prompt:}$2"
@@ -446,6 +562,39 @@ elif [ -z "$project_root" ]; then
 fi
 [ -z "$project_root" ] || [ -d "$project_root" ] || die "--project directory not found: $project_root"
 
+claude_global_instructions="$claude_home/CLAUDE.md"
+if [ "$global_instructions_explicit" -eq 0 ]; then
+  resolved_claude_global=$(resolve_path "$claude_global_instructions" 2>/dev/null || true)
+  if [ "$(basename "$resolved_claude_global" 2>/dev/null)" = "shared.md" ]; then
+    global_instructions_dir=$(dirname "$resolved_claude_global")
+  fi
+fi
+if [ -n "$global_instructions_dir" ]; then
+  [ -d "$global_instructions_dir" ] ||
+    die "global instructions directory not found: $global_instructions_dir"
+  global_instructions_dir=$(
+    unset CDPATH
+    cd -P -- "$global_instructions_dir" 2>/dev/null && pwd
+  ) ||
+    die "cannot resolve global instructions directory: $global_instructions_dir"
+  [ -f "$global_instructions_dir/shared.md" ] ||
+    die "global instructions directory must contain shared.md: $global_instructions_dir"
+fi
+
+shared_instructions="$claude_global_instructions"
+append_instructions=""
+copilot_instructions=""
+cursor_instructions=""
+if [ -n "$global_instructions_dir" ]; then
+  shared_instructions="$global_instructions_dir/shared.md"
+  [ -f "$global_instructions_dir/append.md" ] &&
+    append_instructions="$global_instructions_dir/append.md"
+  [ -f "$global_instructions_dir/copilot.md" ] &&
+    copilot_instructions="$global_instructions_dir/copilot.md"
+  [ -f "$global_instructions_dir/cursor.md" ] &&
+    cursor_instructions="$global_instructions_dir/cursor.md"
+fi
+
 want_opencode=0
 want_pi=0
 want_codex=0
@@ -489,6 +638,8 @@ note() { printf '%s\n' "$1"; }
 # a symlink pointing inside one of them — which covers the plugin cache too, since that
 # lives under ~/.claude. Anything pointing elsewhere is the user's own and is left alone.
 source_roots="$claude_home"
+[ -n "$global_instructions_dir" ] && source_roots="$source_roots
+$global_instructions_dir"
 [ -n "$project_root" ] && source_roots="$source_roots
 $project_root/.claude"
 
@@ -654,7 +805,7 @@ MDC
     printf '%s. %s\n' "$first" "$f"
     first=$((first + 1))
   done <<FILES
-$(cursor_rule_sources "$src")
+$(cursor_rule_sources)
 FILES
   cat <<'MDC'
 
@@ -663,17 +814,62 @@ which one was missing.
 MDC
 }
 
-# The rule's targets, in priority order: the append-prompt files first (they are the
-# outermost layer Claude Code itself applies via --append-system-prompt-file), then the
-# global CLAUDE.md. Missing files are dropped rather than listed as broken.
+# Native global instruction files for harnesses that cannot load the bundle directly.
+render_instruction_pointer() {
+  local src="$1" sources="$2" f first=1
+  printf '# %s %s — edit the source, not this file\n\n' "$SHIM_MARKER" "$src"
+  cat <<'INSTRUCTIONS'
+Before planning, answering a substantive question, editing a file, or running a command,
+read these instruction files and follow them for the rest of the session. They are listed
+in priority order — an earlier file wins a conflict with a later one.
+
+INSTRUCTIONS
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    printf '%s. %s\n' "$first" "$f"
+    first=$((first + 1))
+  done <<FILES
+$sources
+FILES
+  cat <<'INSTRUCTIONS'
+
+If a file cannot be read, continue with whichever of the others you could read, and say
+which one was missing.
+INSTRUCTIONS
+}
+
+render_global_instruction_pointer() {
+  render_instruction_pointer "$1" "$(global_instruction_sources)"
+}
+
+render_copilot_instruction_pointer() {
+  render_instruction_pointer "$1" "$(copilot_instruction_sources)"
+}
+
+global_instruction_sources() {
+  [ -n "$append_instructions" ] && printf '%s\n' "$append_instructions"
+  printf '%s\n' "$shared_instructions"
+}
+
+copilot_instruction_sources() {
+  [ -n "$copilot_instructions" ] && printf '%s\n' "$copilot_instructions"
+  global_instruction_sources
+}
+
+# Cursor receives the bundle sources plus any extra append-prompt files configured by the
+# caller. Missing files are omitted instead of becoming broken references.
 cursor_rule_sources() {
-  local claude_md="$1" rest="$cursor_append_prompt" one
+  local rest="$cursor_append_prompt" one
+  [ -n "$append_instructions" ] && printf '%s\n' "$append_instructions"
   while [ -n "$rest" ]; do
     one="${rest%%:*}"
     [ "$one" = "$rest" ] && rest="" || rest="${rest#*:}"
-    [ -n "$one" ] && [ -f "$one" ] && printf '%s\n' "$one"
+    [ -n "$one" ] || continue
+    [ -f "$one" ] || continue
+    [ "$one" = "$append_instructions" ] && continue
+    printf '%s\n' "$one"
   done
-  printf '%s\n' "$claude_md"
+  printf '%s\n' "$shared_instructions"
 }
 
 # Shim kinds are content-generated rather than linked; each maps to its renderer.
@@ -681,13 +877,15 @@ render_shim() {
   case "$1" in
     agent-shim) translate_agent "$2" ;;
     cursor-rule) render_cursor_rule "$2" ;;
+    global-instructions) render_global_instruction_pointer "$2" ;;
+    copilot-instructions) render_copilot_instruction_pointer "$2" ;;
     *) return 1 ;;
   esac
 }
 
 is_shim_kind() {
   case "$1" in
-    agent-shim | cursor-rule) return 0 ;;
+    agent-shim | cursor-rule | global-instructions | copilot-instructions) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -747,23 +945,53 @@ plan_compat_tree "claude-user" "$claude_home" \
   "$opencode_dir/agent" "$opencode_dir/command" "$pi_dir/prompts" \
   "$cursor_dir/commands" "$codex_dir/prompts" "$copilot_dir/agents"
 
-# The global CLAUDE.md: opencode reads ~/.claude/CLAUDE.md directly, so it needs nothing.
-# pi does not — it loads ~/.pi/agent/AGENTS.md — so that one file is a real gap, and a
-# symlink closes it with no copy. codex has the same gap: its global instructions live at
-# ~/.codex/AGENTS.md and CLAUDE.md is not read natively (project-level CLAUDE.md can be
-# opted into via project_doc_fallback_filenames in config.toml — a config change, not a
-# link, so it is only reported). Cursor has no global instructions FILE at all (user rules
-# live in the settings UI), and its CLI reads the project-root CLAUDE.md by itself. copilot
-# CLI has the same gap as pi/codex: it reads CLAUDE.md/AGENTS.md at the git root and cwd,
-# but not ~/.claude/CLAUDE.md — its own global file is ~/.copilot/copilot-instructions.md.
-if [ "$want_pi" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
-  plan_link instructions "claude-user" "$claude_home/CLAUDE.md" "$pi_dir" "AGENTS.md"
-fi
-if [ "$want_codex" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
-  plan_link instructions "claude-user" "$claude_home/CLAUDE.md" "$codex_dir" "AGENTS.md"
-fi
-if [ "$want_copilot" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
-  plan_link instructions "claude-user" "$claude_home/CLAUDE.md" "$copilot_dir" "copilot-instructions.md"
+# A global instruction bundle uses the native entrypoint of each harness. Harnesses that
+# accept only one global file receive a generated pointer to append.md + shared.md.
+# Without a bundle, retain the original CLAUDE.md symlink behavior.
+if [ -n "$global_instructions_dir" ]; then
+  if [ "$want_opencode" -eq 1 ] && [ -n "$append_instructions" ]; then
+    plan_link global-instructions "global-instructions" "$shared_instructions" \
+      "$opencode_dir" "AGENTS.md"
+  fi
+  if [ "$want_pi" -eq 1 ]; then
+    if [ -n "$append_instructions" ]; then
+      plan_link global-instructions "global-instructions" "$shared_instructions" \
+        "$pi_dir" "AGENTS.md"
+    else
+      plan_link instructions "global-instructions" "$shared_instructions" "$pi_dir" "AGENTS.md"
+    fi
+  fi
+  if [ "$want_codex" -eq 1 ]; then
+    if [ -n "$append_instructions" ]; then
+      plan_link global-instructions "global-instructions" "$shared_instructions" \
+        "$codex_dir" "AGENTS.md"
+    else
+      plan_link instructions "global-instructions" "$shared_instructions" "$codex_dir" "AGENTS.md"
+    fi
+  fi
+  if [ "$want_copilot" -eq 1 ]; then
+    if [ -n "$copilot_instructions" ]; then
+      plan_link copilot-instructions "global-instructions" "$copilot_instructions" \
+        "$copilot_dir" "copilot-instructions.md"
+    elif [ -n "$append_instructions" ]; then
+      plan_link global-instructions "global-instructions" "$shared_instructions" \
+        "$copilot_dir" "copilot-instructions.md"
+    else
+      plan_link instructions "global-instructions" "$shared_instructions" \
+        "$copilot_dir" "copilot-instructions.md"
+    fi
+  fi
+else
+  if [ "$want_pi" -eq 1 ] && [ -f "$claude_global_instructions" ]; then
+    plan_link instructions "claude-user" "$claude_global_instructions" "$pi_dir" "AGENTS.md"
+  fi
+  if [ "$want_codex" -eq 1 ] && [ -f "$claude_global_instructions" ]; then
+    plan_link instructions "claude-user" "$claude_global_instructions" "$codex_dir" "AGENTS.md"
+  fi
+  if [ "$want_copilot" -eq 1 ] && [ -f "$claude_global_instructions" ]; then
+    plan_link instructions "claude-user" "$claude_global_instructions" \
+      "$copilot_dir" "copilot-instructions.md"
+  fi
 fi
 # The append-prompt paths are remembered in the rule itself. Without this, a sync run from
 # any shell that did not export $CURSOR_APPEND_PROMPT (a non-interactive shell, cron, a hook)
@@ -775,7 +1003,8 @@ if [ "$want_cursor" -eq 1 ] && [ "$cursor_append_explicit" -eq 0 ]; then
   if is_own_shim "$cursor_prev_rule"; then
     while IFS= read -r prev_path; do
       [ -n "$prev_path" ] || continue
-      [ "$prev_path" = "$claude_home/CLAUDE.md" ] && continue
+      [ "$prev_path" = "$shared_instructions" ] && continue
+      [ "$prev_path" = "$append_instructions" ] && continue
       cursor_append_prompt="${cursor_append_prompt:+$cursor_append_prompt:}$prev_path"
     done <<PREV
 $(sed -n 's/^[0-9][0-9]*\. \(\/.*\)$/\1/p' "$cursor_prev_rule" 2>/dev/null)
@@ -785,8 +1014,13 @@ fi
 
 # cursor reads .cursor/rules/*.mdc at every ancestor of the cwd, so one generated rule in
 # $HOME covers every project under it. See the CURSOR GLOBAL INSTRUCTIONS note at the top.
-if [ "$want_cursor" -eq 1 ] && [ -f "$claude_home/CLAUDE.md" ]; then
-  plan_link cursor-rule "claude-user" "$claude_home/CLAUDE.md" "$cursor_dir/rules" "claude-global.mdc"
+if [ "$want_cursor" -eq 1 ] && [ -f "$shared_instructions" ]; then
+  plan_link cursor-rule "global-instructions" "$shared_instructions" \
+    "$cursor_dir/rules" "claude-global.mdc"
+  if [ -n "$cursor_instructions" ]; then
+    plan_link cursor-rule-file "global-instructions" "$cursor_instructions" \
+      "$cursor_dir/rules" "cursor-instructions.mdc"
+  fi
 fi
 
 if [ -n "$project_root" ]; then
@@ -1018,7 +1252,10 @@ while IFS="	" read -r kind src dst; do
       shimmed=$((shimmed + 1))
       if [ "$kind" = "cursor-rule" ]; then
         shims="$shims
-  $dst (from $src) — alwaysApply frontmatter added; points at the Claude files, no copy"
+  $dst (from $src) — alwaysApply frontmatter added; points at the global instruction sources, no copy"
+      elif [ "$kind" = "global-instructions" ] || [ "$kind" = "copilot-instructions" ]; then
+        shims="$shims
+  $dst (from $src) — native global file points at the instruction bundle, no copy"
       else
         shims="$shims
   $dst (from $src) — tools: rewritten from a YAML list to a map"
@@ -1106,9 +1343,11 @@ count_kind() { grep -c "^$1	" "$plan_file" 2>/dev/null | tr -d ' '; }
 
 echo
 [ "$dry_run" -eq 1 ] && echo "DRY RUN — nothing was changed"
-printf 'planned: %s skills, %s opencode commands, %s pi prompts, %s opencode agents, %s cursor commands, %s cursor agents, %s cursor rules, %s codex prompts, %s copilot agents\n' \
+printf 'planned: %s skills, %s opencode commands, %s pi prompts, %s opencode agents, %s cursor commands, %s cursor agents, %s cursor rules, %s global instruction files, %s codex prompts, %s copilot agents\n' \
   "$(count_kind skill)" "$(count_kind command)" "$(count_kind prompt)" "$(count_kind agent)" \
-  "$(count_kind cursor-command)" "$(count_kind cursor-agent)" "$(count_kind cursor-rule)" \
+  "$(count_kind cursor-command)" "$(count_kind cursor-agent)" \
+  "$(( $(count_kind cursor-rule) + $(count_kind cursor-rule-file) ))" \
+  "$(( $(count_kind global-instructions) + $(count_kind copilot-instructions) ))" \
   "$(count_kind codex-prompt)" "$(count_kind copilot-agent)"
 verb="applied"
 [ "$dry_run" -eq 1 ] && verb="would apply"
@@ -1156,17 +1395,12 @@ if [ "$want_cursor" -eq 1 ]; then
   echo "cursor caveat: cursor-agent (CLI) has a known partial symlink-discovery bug — links whose"
   echo "  TARGETS live outside .cursor/ or .claude/ (e.g. a directory-source marketplace checkout)"
   echo "  may be missed by the CLI while the IDE (2.5+) sees them. Verify with cursor-agent once."
-  if [ -f "$claude_home/CLAUDE.md" ]; then
+  if [ -f "$shared_instructions" ]; then
     echo "cursor global rule: ~/.cursor/rules/*.mdc is read at every ancestor of the cwd, so the"
     echo "  generated claude-global.mdc only reaches projects UNDER \$HOME. A repo elsewhere needs"
     echo "  its own <repo>/.cursor/rules/ copy."
-    if [ -n "$cursor_append_prompt" ]; then
-      printf '  rule points at: %s\n' \
-        "$(cursor_rule_sources "$claude_home/CLAUDE.md" | tr '\n' ' ')"
-    else
-      echo "  rule points at ~/.claude/CLAUDE.md only — add --cursor-append-prompt FILE (or set"
-      echo "  \$CURSOR_APPEND_PROMPT) to include what Claude Code gets via --append-system-prompt-file"
-    fi
+    printf '  rule points at: %s\n' \
+      "$(cursor_rule_sources | tr '\n' ' ')"
   fi
 fi
 

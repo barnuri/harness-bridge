@@ -1,10 +1,12 @@
 # harness-bridge
 
 Use your existing **Claude Code** setup — plugins, skills, subagents, slash commands, MCP
-servers, `CLAUDE.md` — from **opencode**, **pi**, **codex**, **cursor**, and **GitHub
-Copilot CLI**, without duplicating a single file.
+servers, and global instructions — from **opencode**, **pi**, **codex**, **cursor**, and
+**GitHub Copilot CLI**, without duplicating source files.
 
-Your Claude Code setup is the source of truth. Nothing under `~/.claude` is ever modified.
+Claude remains the default source of truth. For richer cross-harness instructions, an
+optional repository-independent bundle can provide shared, append, and harness-specific
+files. Nothing under `~/.claude` is ever modified.
 
 ## Compatibility
 
@@ -18,7 +20,7 @@ updated whenever harness support changes (see `CLAUDE.md`).
 | **Plugin subagents** (`agents/*.md`) | ✅ link/shim → `~/.config/opencode/agent/` | — no subagent concept | — TOML agents, different schema | ✅ link → `~/.cursor/agents/` (reads Claude markdown as-is) | ✅ link → `~/.copilot/agents/` (reads Claude markdown as-is) |
 | **Plain `~/.claude/agents/`** | ✅ link/shim | — | — | ✅ auto-scanned (compat dir) | ✅ link → `~/.copilot/agents/` (not auto-scanned) |
 | **Slash commands** (`commands/*.md`) | ✅ link → `command/` | ✅ link → `prompts/` | ✅ link → `~/.codex/prompts/` (deprecated surface, still loaded) | ✅ link → `~/.cursor/commands/` | — no custom command/prompt-file surface |
-| **Global `~/.claude/CLAUDE.md`** | ✅ read natively | ✅ link → `~/.pi/agent/AGENTS.md` | ✅ link → `~/.codex/AGENTS.md` | 🟡 shim → `~/.cursor/rules/claude-global.mdc` (always-on rule pointing at it; projects under `$HOME` only) | ✅ link → `~/.copilot/copilot-instructions.md` |
+| **Global instructions** (`CLAUDE.md` or bundle) | ✅ native `CLAUDE.md`; bundle append pointer via `~/.config/opencode/AGENTS.md` | ✅ native `AGENTS.md` pointer/link | ✅ native `AGENTS.md` pointer/link | 🟡 native `.mdc` rule(s), projects under `$HOME` only | ✅ native `copilot-instructions.md` |
 | **Project `CLAUDE.md`** | ✅ read natively | — | — opt-in via `project_doc_fallback_filenames` in `config.toml` | ✅ CLI reads it natively | ✅ CLI reads it natively (git root & cwd) |
 | **MCP servers** | ✅ `--write-mcp` → `opencode.jsonc` (translated) | — no MCP support | 🟡 `--mcp-snippet` prints TOML to paste | ✅ `--write-mcp` → `~/.cursor/mcp.json` (same schema as Claude) | ✅ `--write-mcp` → `~/.copilot/mcp-config.json` (translated) |
 | **Saved dynamic workflows** (plugin `workflows/*.js`, `~/.claude/workflows/`, `.claude/workflows/`) | — no Workflow runtime | — | — | — | — |
@@ -44,9 +46,76 @@ bin/harness-bridge.sh --report     # what's shared, what's missing
 bin/harness-bridge.sh --dry-run    # what it would do
 bin/harness-bridge.sh --write-mcp  # do it, including MCP servers
 
-# give cursor the same global instructions Claude Code runs with
+# use a generic global instruction bundle
+bin/harness-bridge.sh --global-instructions-dir ~/path/to/global-instructions
+
+# add another shared append file for cursor
 bin/harness-bridge.sh --cursor-append-prompt ~/path/to/append-to-system-prompt.md
 ```
+
+## Global instruction bundles
+
+A bundle is any directory with this contract; its name and repository location do not
+matter:
+
+```text
+global-instructions/
+  shared.md    # required: defaults for every harness
+  append.md    # optional: additional shared instructions, applied before shared.md
+  copilot.md   # optional: Copilot-specific native global instructions
+  cursor.md    # optional: Cursor-specific native rule, including .mdc frontmatter
+```
+
+Configure it with `--global-instructions-dir DIR` or
+`HARNESS_GLOBAL_INSTRUCTIONS_DIR=DIR`. It is also autodetected when
+`~/.claude/CLAUDE.md` resolves to a file named `shared.md`; the parent directory becomes
+the bundle.
+
+Routing stays native:
+
+- **opencode** reads `~/.claude/CLAUDE.md` itself. When `append.md` exists, the bridge
+  writes `~/.config/opencode/AGENTS.md` as a pointer to append + shared.
+- **pi** and **codex** receive native `AGENTS.md` pointer files for append + shared.
+- **Cursor** receives an always-on `.mdc` pointer for append + shared and, when present,
+  a symlink from `~/.cursor/rules/cursor-instructions.mdc` to `cursor.md`.
+- **Copilot CLI** receives a native `copilot-instructions.md` pointer to its optional
+  `copilot.md`, followed by append + shared.
+
+If no bundle is configured or autodetected, the original `~/.claude/CLAUDE.md` behavior
+is unchanged.
+
+## Persistent options with dotenv
+
+Use `--env-file FILE`, set `HARNESS_BRIDGE_ENV_FILE`, or put
+`.harness-bridge.env` in the current directory. Values are parsed as data, not sourced as
+shell code. Relative `HARNESS_GLOBAL_INSTRUCTIONS_DIR` paths resolve from the env file's
+directory.
+
+```dotenv
+HARNESS_GLOBAL_INSTRUCTIONS_DIR=./global-instructions
+HARNESS_BRIDGE_TARGET=all
+HARNESS_BRIDGE_NO_PROJECT=true
+```
+
+Supported keys:
+
+| Key | Equivalent option |
+|---|---|
+| `HARNESS_GLOBAL_INSTRUCTIONS_DIR` | `--global-instructions-dir` |
+| `CURSOR_APPEND_PROMPT` | `--cursor-append-prompt` |
+| `HARNESS_BRIDGE_TARGET` | `--target` |
+| `HARNESS_BRIDGE_PROJECT` | `--project` |
+| `HARNESS_BRIDGE_DRY_RUN` | `--dry-run` |
+| `HARNESS_BRIDGE_NO_PRUNE` | `--no-prune` |
+| `HARNESS_BRIDGE_FORCE` | `--force` |
+| `HARNESS_BRIDGE_NO_PROJECT` | `--no-project` |
+| `HARNESS_BRIDGE_MCP_SNIPPET` | `--mcp-snippet` |
+| `HARNESS_BRIDGE_WRITE_MCP` | `--write-mcp` |
+| `HARNESS_BRIDGE_NO_CURSOR_APPEND_PROMPT` | `--no-cursor-append-prompt` |
+
+Precedence is explicit CLI arguments, then the selected dotenv file, then ordinary
+environment variables and built-in defaults. Unknown dotenv keys and invalid boolean
+values fail explicitly.
 
 ## Why
 
@@ -87,8 +156,11 @@ global one, so it is linked to `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md`, an
 | `~/.claude/commands/*.md` | same four command/prompt dirs as plugin commands | opencode, pi, cursor, codex |
 | `<project>/.claude/agents/*.md` | `<project>/.opencode/agent/`, `<project>/.github/agents/` | opencode, copilot (cursor reads the source natively) |
 | `<project>/.claude/commands/*.md` | `<project>/.opencode/command/`, `<project>/.pi/prompts/`, `<project>/.cursor/commands/` | opencode, pi, cursor |
-| `~/.claude/CLAUDE.md` | `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md`, `~/.copilot/copilot-instructions.md` | pi, codex, copilot |
-| `~/.claude/CLAUDE.md` | `~/.cursor/rules/claude-global.mdc` (generated pointer, not a link) | cursor |
+| instruction bundle `shared.md` + optional `append.md` | native global pointer files | opencode, pi, codex, cursor |
+| instruction bundle optional `copilot.md` + shared sources | `~/.copilot/copilot-instructions.md` | copilot |
+| instruction bundle `cursor.md` | `~/.cursor/rules/cursor-instructions.mdc` | cursor |
+| fallback `~/.claude/CLAUDE.md` | `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md`, `~/.copilot/copilot-instructions.md` | pi, codex, copilot |
+| fallback `~/.claude/CLAUDE.md` | `~/.cursor/rules/claude-global.mdc` (generated pointer) | cursor |
 
 Whole skill *directories* are linked, not just `SKILL.md`, so bundled scripts and
 references resolve. All five harnesses follow symlinked skill directories (see the cursor
@@ -114,8 +186,9 @@ all, so Claude's `commands/*.md` are reported as not migrated for it rather than
    when its **own** frontmatter says `alwaysApply: true`, and `CLAUDE.md` has no
    frontmatter, so a symlink cannot close the gap. The generated
    `~/.cursor/rules/claude-global.mdc` carries the frontmatter and *names* the Claude
-   files instead of copying them, so edits to `~/.claude/CLAUDE.md` take effect
-   immediately rather than at the next sync. Add the file Claude Code gets via
+   files instead of copying them, so edits to the instruction sources take effect
+   immediately rather than at the next sync. Bundle `append.md` is included
+   automatically. Add other files Claude Code gets via
    `--append-system-prompt-file` with `--cursor-append-prompt FILE` (repeatable, or
    `$CURSOR_APPEND_PROMPT` colon-separated); it is listed ahead of `CLAUDE.md`, matching
    Claude Code's own precedence. Two limits, both reported on every run: the rule only
@@ -160,16 +233,18 @@ rmdir ~/.cursor/rules && ln -sfn ~/my-dotfiles/cursor/rules ~/.cursor/rules
 ```
 
 Writes, regeneration and pruning all follow the link; the link itself is never touched.
-The rule remembers its own `--cursor-append-prompt` paths, so a run from a shell that never
+The rule remembers its own extra `--cursor-append-prompt` paths, so a run from a shell that never
 exported `$CURSOR_APPEND_PROMPT` (cron, a hook, any non-interactive shell) reproduces the
 same file byte-for-byte instead of leaving a diff. Clear them with
-`--no-cursor-append-prompt`. The one caveat left: the generated rule embeds absolute paths,
+`--no-cursor-append-prompt`. A bundle's `append.md` remains because it is part of the
+bundle contract, not an extra Cursor override. The generated rule embeds absolute paths,
 so it is machine-specific.
 
 ## Safety
 
 - A destination entry is **owned** iff it is a symlink whose target points inside a Claude
-  source root, or a file carrying the generated-shim marker. Only those are ever removed.
+  source root or the selected instruction bundle, or a file carrying the generated-shim
+  marker. Only those are ever removed.
 - Real files, real directories, and hand-made links are reported as "left alone" and never
   touched or overwritten — unless `--force` is given.
 - `--force` (off by default) replaces a conflicting real file/dir or hand-made symlink with
@@ -235,10 +310,7 @@ so removal stays recoverable). Optional: `claude` for `--report`, `opencode`/`pi
 
 The script is plain POSIX-ish bash — no GNU-only or BSD-only flags — and has been run
 against both macOS and Linux (Debian/Alpine) with an identical result: same plans, same
-links, same test suite passing (168/168 on Linux with `jq` + a `trash` command installed;
-macOS has 5 pre-existing, environment-specific test failures from a `/var` vs
-`/private/var` `mktemp` path-canonicalization quirk in the test harness itself, unrelated
-to the tool's actual behavior).
+links, with the same test suite passing on macOS and Linux.
 
 - **macOS / Linux** — no extra setup. Install `jq` (`brew install jq` / `apt install jq` /
   `dnf install jq`) and, optionally, a `trash` command (`brew install trash`, or the
@@ -260,7 +332,7 @@ to the tool's actual behavior).
 ## Tests
 
 ```bash
-bash test/harness-bridge.test.sh   # 168 assertions, throwaway fixture HOME
+bash test/harness-bridge.test.sh   # 191 assertions, throwaway fixture HOME
 ```
 
 Every case runs against a temporary `HOME`; the suite never reads or writes the real

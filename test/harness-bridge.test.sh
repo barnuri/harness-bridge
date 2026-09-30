@@ -133,13 +133,27 @@ write_manifest() {
 run_sync() {
   local home="$1"
   shift
-  HOME="$home" bash "$SCRIPT" --no-project "$@" 2>&1
+  env -u CURSOR_APPEND_PROMPT -u HARNESS_GLOBAL_INSTRUCTIONS_DIR \
+    HOME="$home" bash "$SCRIPT" --no-project "$@" 2>&1
 }
 
 run_sync_raw() {
   local home="$1"
   shift
-  HOME="$home" bash "$SCRIPT" "$@" 2>&1
+  env -u CURSOR_APPEND_PROMPT -u HARNESS_GLOBAL_INSTRUCTIONS_DIR \
+    HOME="$home" bash "$SCRIPT" "$@" 2>&1
+}
+
+add_instruction_bundle() {
+  local home="$1" bundle
+  bundle="$home/config/global-instructions"
+  mkdir -p "$bundle"
+  printf 'shared instructions\n' >"$bundle/shared.md"
+  printf 'append instructions\n' >"$bundle/append.md"
+  printf 'copilot instructions\n' >"$bundle/copilot.md"
+  printf '%s\n' '---' 'alwaysApply: true' '---' 'cursor instructions' >"$bundle/cursor.md"
+  ln -s "../config/global-instructions/shared.md" "$home/.claude/CLAUDE.md"
+  (unset CDPATH; cd -P -- "$bundle" && pwd)
 }
 
 add_user_agent() {
@@ -939,6 +953,126 @@ mv "$proj/.claude/agents/reviewer.md" "$proj/removed-agent.md"
 run_sync_raw "$h" --project "$proj" >/dev/null
 assert_missing "case46: project copilot agent link pruned once the source is gone" \
   "$proj/.github/agents/reviewer.md"
+
+# --- Case 47: a generic instruction bundle is autodetected through the global CLAUDE.md
+# symlink and routed through each harness's native global entrypoint.
+h=$(new_home)
+bundle=$(add_instruction_bundle "$h")
+write_manifest "$h"
+run_sync "$h" >/dev/null
+assert_contains "case47: opencode native global file includes append" \
+  "1. $bundle/append.md" "$(cat "$h/.config/opencode/AGENTS.md")"
+assert_contains "case47: opencode native global file includes shared" \
+  "2. $bundle/shared.md" "$(cat "$h/.config/opencode/AGENTS.md")"
+assert_contains "case47: pi native global file includes append" \
+  "1. $bundle/append.md" "$(cat "$h/.pi/agent/AGENTS.md")"
+assert_contains "case47: codex native global file includes shared" \
+  "2. $bundle/shared.md" "$(cat "$h/.codex/AGENTS.md")"
+assert_contains "case47: copilot native file includes harness-specific instructions" \
+  "1. $bundle/copilot.md" "$(cat "$h/.copilot/copilot-instructions.md")"
+assert_contains "case47: copilot native file includes append" \
+  "2. $bundle/append.md" "$(cat "$h/.copilot/copilot-instructions.md")"
+assert_contains "case47: copilot native file includes shared" \
+  "3. $bundle/shared.md" "$(cat "$h/.copilot/copilot-instructions.md")"
+assert_contains "case47: cursor shared rule includes bundle append" \
+  "1. $bundle/append.md" "$(cat "$h/.cursor/rules/claude-global.mdc")"
+assert_contains "case47: cursor shared rule includes bundle shared" \
+  "2. $bundle/shared.md" "$(cat "$h/.cursor/rules/claude-global.mdc")"
+assert_link_to "case47: cursor uses its harness-specific native rule" \
+  "$h/.cursor/rules/cursor-instructions.mdc" "$bundle/cursor.md"
+
+# --- Case 48: the generic bundle can be supplied explicitly and does not depend on a
+# repository name or on CLAUDE.md being a symlink.
+h=$(new_home)
+printf 'legacy global\n' >"$h/.claude/CLAUDE.md"
+bundle="$h/arbitrary/location"
+mkdir -p "$bundle"
+printf 'shared\n' >"$bundle/shared.md"
+printf 'append\n' >"$bundle/append.md"
+bundle=$(unset CDPATH; cd -P -- "$bundle" && pwd)
+write_manifest "$h"
+env -u CURSOR_APPEND_PROMPT HOME="$h" HARNESS_GLOBAL_INSTRUCTIONS_DIR="$bundle" \
+  bash "$SCRIPT" --no-project --target pi >/dev/null
+assert_contains "case48: environment override uses arbitrary bundle path" \
+  "1. $bundle/append.md" "$(cat "$h/.pi/agent/AGENTS.md")"
+run_sync "$h" --target codex --global-instructions-dir "$bundle" >/dev/null
+assert_contains "case48: CLI override uses arbitrary bundle path" \
+  "2. $bundle/shared.md" "$(cat "$h/.codex/AGENTS.md")"
+
+# --- Case 49: bundle awareness does not weaken conflict protection. Existing real files
+# remain untouched unless the caller explicitly supplies --force.
+h=$(new_home)
+bundle=$(add_instruction_bundle "$h")
+write_manifest "$h"
+mkdir -p "$h/.copilot" "$h/.config/opencode"
+printf 'my copilot rules\n' >"$h/.copilot/copilot-instructions.md"
+printf 'my opencode rules\n' >"$h/.config/opencode/AGENTS.md"
+out=$(run_sync "$h")
+assert_eq "case49: real copilot instructions remain untouched" \
+  "my copilot rules" "$(cat "$h/.copilot/copilot-instructions.md")"
+assert_eq "case49: real opencode instructions remain untouched" \
+  "my opencode rules" "$(cat "$h/.config/opencode/AGENTS.md")"
+assert_contains "case49: bundle conflicts are reported" "left alone" "$out"
+
+# --- Case 50: an explicit bundle must satisfy the generic contract.
+h=$(new_home)
+write_manifest "$h"
+mkdir -p "$h/incomplete-bundle"
+out=$(run_sync "$h" --global-instructions-dir "$h/incomplete-bundle" || true)
+assert_contains "case50: missing shared.md is rejected" \
+  "must contain shared.md" "$out"
+
+# --- Case 51: an explicit dotenv file applies persistent options, resolves bundle paths
+# relative to itself, and still yields to explicit CLI arguments.
+h=$(new_home)
+bundle="$h/config/global-instructions"
+mkdir -p "$bundle"
+printf 'shared\n' >"$bundle/shared.md"
+printf 'append\n' >"$bundle/append.md"
+bundle=$(unset CDPATH; cd -P -- "$bundle" && pwd)
+printf '%s\n' \
+  'HARNESS_GLOBAL_INSTRUCTIONS_DIR=./global-instructions' \
+  'HARNESS_BRIDGE_TARGET=copilot' \
+  >"$h/config/bridge.env"
+write_manifest "$h"
+run_sync "$h" --env-file "$h/config/bridge.env" >/dev/null
+assert_exists "case51: dotenv target is applied" "$h/.copilot/copilot-instructions.md"
+assert_missing "case51: dotenv target excludes pi" "$h/.pi/agent/AGENTS.md"
+run_sync "$h" --env-file "$h/config/bridge.env" --target pi >/dev/null
+assert_contains "case51: CLI target overrides dotenv target" \
+  "1. $bundle/append.md" "$(cat "$h/.pi/agent/AGENTS.md")"
+
+# --- Case 52: HARNESS_BRIDGE_ENV_FILE and a cwd .harness-bridge.env are both supported.
+h=$(new_home)
+bundle="$h/bundle"
+mkdir -p "$bundle"
+printf 'shared\n' >"$bundle/shared.md"
+bundle=$(unset CDPATH; cd -P -- "$bundle" && pwd)
+printf 'HARNESS_GLOBAL_INSTRUCTIONS_DIR=%s\nHARNESS_BRIDGE_TARGET=codex\n' \
+  "$bundle" >"$h/persistent.env"
+write_manifest "$h"
+HOME="$h" HARNESS_BRIDGE_ENV_FILE="$h/persistent.env" \
+  env -u CURSOR_APPEND_PROMPT bash "$SCRIPT" --no-project >/dev/null
+assert_link_to "case52: env-file pointer is loaded" \
+  "$h/.codex/AGENTS.md" "$bundle/shared.md"
+work="$h/work"
+mkdir -p "$work"
+printf 'HARNESS_GLOBAL_INSTRUCTIONS_DIR=%s\nHARNESS_BRIDGE_TARGET=pi\n' \
+  "$bundle" >"$work/.harness-bridge.env"
+(cd "$work" && env -u HARNESS_BRIDGE_ENV_FILE -u CURSOR_APPEND_PROMPT \
+  HOME="$h" bash "$SCRIPT" --no-project >/dev/null)
+assert_link_to "case52: cwd dotenv is auto-loaded" \
+  "$h/.pi/agent/AGENTS.md" "$bundle/shared.md"
+
+# --- Case 53: dotenv parsing is data-only and rejects unknown options instead of sourcing
+# arbitrary shell.
+h=$(new_home)
+write_manifest "$h"
+printf 'UNSUPPORTED_OPTION=$(touch %s/pwned)\n' "$h" >"$h/bad.env"
+out=$(run_sync "$h" --env-file "$h/bad.env" || true)
+assert_contains "case53: unsupported dotenv option is rejected" \
+  "unsupported option" "$out"
+assert_missing "case53: dotenv content is never executed" "$h/pwned"
 
 echo
 echo "$pass_count passed, $failures failed"

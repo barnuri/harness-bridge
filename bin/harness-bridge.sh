@@ -73,7 +73,8 @@
 #     codex is TOML (config.toml) which is never machine-edited — `--mcp-snippet` prints
 #     the [mcp_servers.*] block to paste. copilot CLI's mcp-config.json needs a schema
 #     translation too ({type: local|http, command/url, env/headers, tools: ["*"]}),
-#     merged with `--write-mcp`. pi has no MCP support at all. Written entries are
+#     merged with `--write-mcp`. pi has no native MCP; with pi-mcp-adapter installed it
+#     reads ~/.agents/mcp.json (Claude shape), merged by `--write-mcp`. Written entries are
 #     regenerated from Claude on every run so Claude stays the single source of truth.
 #   - Hooks / permissions in settings.json: no equivalent concept in any harness.
 #   - Plugin hooks: opencode uses JS plugin handlers, pi uses TS extensions; copilot CLI
@@ -228,6 +229,9 @@ installed_json="$plugins_dir/installed_plugins.json"
 agents_skills_dir="${AGENTS_SKILLS_DIR:-$HOME/.agents/skills}"
 opencode_dir="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 pi_dir="${PI_AGENT_DIR:-$HOME/.pi/agent}"
+# pi has no MCP of its own; the pi-mcp-adapter extension reads this tool-agnostic file
+# (Claude's {command,args,env}/{url} shape under mcpServers) in every adapter version.
+pi_mcp_file="${PI_MCP_CONFIG_FILE:-$HOME/.agents/mcp.json}"
 codex_dir="${CODEX_HOME_DIR:-$HOME/.codex}"
 cursor_dir="${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
 copilot_dir="${COPILOT_CONFIG_DIR:-${COPILOT_HOME:-$HOME/.copilot}}"
@@ -356,6 +360,15 @@ in_list() {
   printf '%s\n' "$2" | grep -qxF "$1"
 }
 
+# present / EMPTY / MISSING — an empty instructions file loads nothing, which a plain
+# existence check would report as fine.
+file_state() {
+  if [ ! -e "$1" ]; then echo MISSING
+  elif [ -f "$1" ] && [ ! -s "$1" ]; then echo EMPTY
+  else echo present
+  fi
+}
+
 run_report() {
   command -v claude >/dev/null 2>&1 || die "claude CLI not found — needed for --report"
   local sk_json cfg_json oc_skills oc_agents oc_cmds oc_mcp oc_all pi_skills pi_prompts pi_all aliases alias fm d gaps=""
@@ -462,7 +475,13 @@ PLUGINS
     "$(printf '%s\n' "$oc_cmds" | grep -c .)" "$(printf '%s\n' "$oc_mcp" | grep -c .)"
   printf '  pi:       %s skills, %s prompts, global AGENTS.md %s\n' \
     "$(printf '%s\n' "$pi_skills" | grep -c .)" "$(printf '%s\n' "$pi_prompts" | grep -c .)" \
-    "$([ -e "$pi_dir/AGENTS.md" ] && echo present || echo MISSING)"
+    "$(file_state "$pi_dir/AGENTS.md")"
+  printf '  codex:    global AGENTS.md %s, %s prompts\n' \
+    "$(file_state "$codex_dir/AGENTS.md")" "$(ls -1 "$codex_dir/prompts" 2>/dev/null | grep -c .)"
+  printf '  cursor:   %s agents, %s commands, %s mcp servers\n' \
+    "$(ls -1 "$cursor_dir/agents" 2>/dev/null | grep -c .)" \
+    "$(ls -1 "$cursor_dir/commands" 2>/dev/null | grep -c .)" \
+    "$(jq -r '.mcpServers // {} | keys | length' "$cursor_dir/mcp.json" 2>/dev/null || echo 0)"
   printf '  claude:   %s enabled plugins\n' \
     "$(claude plugin list --json 2>/dev/null | jq '[.[] | select(.enabled != false)] | length')"
 
@@ -1088,6 +1107,14 @@ component_dirs() {
   done
 }
 
+# True only when ~/.claude/settings.json explicitly sets enabledPlugins[<key>] to false.
+# A plugin absent from the map (e.g. managed scope) counts as enabled, like Claude does.
+plugin_disabled_in_claude() {
+  local settings="$claude_home/settings.json"
+  [ -f "$settings" ] || return 1
+  jq -e --arg k "$1" '(.enabledPlugins // {})[$k] == false' "$settings" >/dev/null 2>&1
+}
+
 # --- Build the plan from the live plugin set ------------------------------------------
 # installed_plugins.json is the only source of truth for which version is live. The cache
 # also holds superseded copies (flagged with .orphaned_at); globbing it would link dead code.
@@ -1095,6 +1122,15 @@ component_dirs() {
 while IFS="	" read -r plugin_key install_path; do
   [ -n "$install_path" ] || continue
   plugin="${plugin_key%%@*}"
+
+  # Claude keeps disabled plugins installed (and in the manifest); only enabledPlugins in
+  # settings.json says whether Claude actually loads one. Linking a disabled plugin would
+  # give the other harnesses skills, agents and MCP servers Claude itself does not have.
+  if plugin_disabled_in_claude "$plugin_key"; then
+    skipped_plugins=$((skipped_plugins + 1))
+    note "skip $plugin: disabled in Claude settings (enabledPlugins)"
+    continue
+  fi
 
   if [ ! -d "$install_path" ]; then
     skipped_plugins=$((skipped_plugins + 1))
@@ -1229,8 +1265,15 @@ while IFS="	" read -r kind src dst; do
           continue
         fi
       else
-        conflicts="$conflicts
+        # An empty placeholder is still the user's file, but it silently blanks the
+        # harness's instructions, so say so instead of reporting a generic conflict.
+        if [ -f "$dst" ] && [ ! -s "$dst" ]; then
+          conflicts="$conflicts
+  $dst (EMPTY real file already there — left alone; it hides the synced content, trash it and re-run)"
+        else
+          conflicts="$conflicts
   $dst (real file/dir already there — left alone)"
+        fi
         continue
       fi
     fi
@@ -1394,7 +1437,7 @@ fi
 echo
 echo "not migrated (no linkable equivalent):"
 [ -n "$hook_plugins" ] && echo "  hooks:$hook_plugins — opencode uses JS plugin handlers, pi uses TS extensions; codex/cursor have no plugin-hook concept; copilot CLI has its own separate hooks system"
-[ -n "$mcp_plugins" ] && echo "  .mcp.json servers:$mcp_plugins — see --mcp-snippet / --write-mcp; pi has no MCP support"
+[ -n "$mcp_plugins" ] && echo "  .mcp.json servers:$mcp_plugins — see --mcp-snippet / --write-mcp; pi needs the pi-mcp-adapter extension"
 echo "  subagents for pi (no subagent concept) and codex (TOML agents with a different schema — a symlink cannot convert them)"
 echo "  cursor user rules entered in the IDE settings UI — stored server-side, no file to link"
 echo "  codex project-level CLAUDE.md — opt in via project_doc_fallback_filenames in ~/.codex/config.toml (a config change, not a link)"
@@ -1545,6 +1588,11 @@ if [ -n "$mcp_translated" ] && [ "$mcp_snippet" -eq 1 ]; then
     echo "paste into $cursor_dir/mcp.json (printed only — cursor's schema matches Claude's):"
     printf '%s\n' "$mcp_merged" | jq '{mcpServers: .}'
   fi
+  if [ "$want_pi" -eq 1 ]; then
+    echo
+    echo "paste into $pi_mcp_file (printed only — read by the pi-mcp-adapter extension):"
+    printf '%s\n' "$mcp_merged" | jq '{mcpServers: .}'
+  fi
   if [ "$want_codex" -eq 1 ]; then
     echo
     echo "paste into $codex_dir/config.toml (printed only — TOML is never machine-edited):"
@@ -1581,6 +1629,29 @@ elif [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
         rm -f "$tmp_cursor" 2>/dev/null
         echo "  could not write $cursor_mcp — use --mcp-snippet and paste by hand"
       fi
+    fi
+  fi
+  # pi: same Claude shape as cursor, into the adapter's tool-agnostic global file. Created
+  # 0600 because server env blocks can carry tokens. Only useful with pi-mcp-adapter
+  # installed (`pi install npm:pi-mcp-adapter`), so say so when it is missing.
+  if [ "$want_pi" -eq 1 ]; then
+    if [ "$dry_run" -eq 1 ]; then
+      echo "  would merge $(printf '%s' "$mcp_merged" | jq -r 'keys | length') server(s) into $pi_mcp_file"
+    elif [ -s "$pi_mcp_file" ] && ! jq -e . "$pi_mcp_file" >/dev/null 2>&1; then
+      echo "  $pi_mcp_file is not valid JSON — not rewriting it. Use --mcp-snippet and paste by hand."
+    else
+      mkdir -p "$(dirname "$pi_mcp_file")"
+      tmp_pi="$pi_mcp_file.tmp.$$"
+      (umask 077
+       jq --argjson add "$mcp_merged" '. + {mcpServers: ((.mcpServers // {}) + $add)}' \
+         "$pi_mcp_file" 2>/dev/null >"$tmp_pi" ||
+       printf '%s' '{}' | jq --argjson add "$mcp_merged" '{mcpServers: $add}' >"$tmp_pi" 2>/dev/null) &&
+        mv -f "$tmp_pi" "$pi_mcp_file" &&
+        echo "  merged $(printf '%s' "$mcp_merged" | jq -r 'keys | length') server(s) into $pi_mcp_file" ||
+        { rm -f "$tmp_pi" 2>/dev/null; echo "  could not write $pi_mcp_file — use --mcp-snippet and paste by hand"; }
+    fi
+    if ! grep -qs 'pi-mcp-adapter' "$pi_dir/settings.json"; then
+      echo "  pi: pi-mcp-adapter is not in $pi_dir/settings.json — run 'pi install npm:pi-mcp-adapter' or pi ignores $pi_mcp_file"
     fi
   fi
   if [ "$want_codex" -eq 1 ]; then
@@ -1637,8 +1708,9 @@ if [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
   fi
 elif [ -n "$mcp_translated" ] && [ "$mcp_snippet" -eq 0 ]; then
   echo "  --mcp-snippet prints per-harness blocks (opencode jsonc, cursor mcp.json, codex TOML,"
-  echo "  copilot mcp-config.json); --write-mcp merges into opencode.jsonc, cursor mcp.json, and"
-  echo "  copilot mcp-config.json (codex stays snippet-only)"
+  echo "  copilot mcp-config.json, pi ~/.agents/mcp.json); --write-mcp merges into opencode.jsonc,"
+  echo "  cursor mcp.json, copilot mcp-config.json and ~/.agents/mcp.json for pi-mcp-adapter"
+  echo "  (codex stays snippet-only)"
 fi
 
 write_copilot_plugin_settings() {

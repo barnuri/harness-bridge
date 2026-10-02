@@ -1187,6 +1187,75 @@ assert_eq "case58: compatible component remains linked" \
 assert_eq "case58: unsupported plugin is not enabled natively" \
   "0" "$(jq '.enabledPlugins // {} | length' "$h/.copilot/settings.json")"
 
+# --- Case 59: a plugin Claude has disabled (enabledPlugins false) is not linked, and its
+# links from an earlier run are pruned; enabled and unlisted plugins still sync.
+h=$(new_home)
+on=$(add_plugin "$h" mp on 1.0.0)
+off=$(add_plugin "$h" mp off 1.0.0)
+managed=$(add_plugin "$h" mp managed 1.0.0)
+add_skill "$on" on-skill
+add_skill "$off" off-skill
+add_agent "$off" off-agent
+add_skill "$managed" managed-skill
+write_manifest "$h" "on@mp" "$on" "off@mp" "$off" "managed@mp" "$managed"
+run_sync "$h" >/dev/null
+assert_exists "case59: before disabling, the plugin is linked" "$h/.agents/skills/off-skill"
+jq -n '{enabledPlugins:{"on@mp":true,"off@mp":false}}' >"$h/.claude/settings.json"
+out=$(run_sync "$h")
+assert_contains "case59: the skip is reported" "skip off: disabled in Claude settings" "$out"
+assert_missing "case59: disabled plugin's skill link is pruned" "$h/.agents/skills/off-skill"
+assert_missing "case59: disabled plugin's cursor agent link is pruned" "$h/.cursor/agents/off-agent.md"
+assert_link_to "case59: enabled plugin still linked" \
+  "$h/.agents/skills/on-skill" "$on/skills/on-skill"
+assert_link_to "case59: plugin absent from enabledPlugins counts as enabled" \
+  "$h/.agents/skills/managed-skill" "$managed/skills/managed-skill"
+
+# --- Case 60: an empty real file at a destination is still left alone, but reported as
+# EMPTY so the user knows it is hiding the synced instructions.
+h=$(new_home)
+printf 'global\n' >"$h/.claude/CLAUDE.md"
+mkdir -p "$h/.codex"
+: >"$h/.codex/AGENTS.md"
+out=$(run_sync "$h" --target codex)
+assert_contains "case60: empty placeholder is called out" \
+  "$h/.codex/AGENTS.md (EMPTY real file already there" "$out"
+assert_eq "case60: empty placeholder is not modified" "0" "$(wc -c <"$h/.codex/AGENTS.md" | tr -d ' ')"
+
+# --- Case 61: --write-mcp gives pi (via pi-mcp-adapter) Claude's MCP servers in
+# ~/.agents/mcp.json, private to the user, merged without dropping existing entries, and
+# a disabled plugin's .mcp.json server is not carried over.
+h=$(new_home)
+off=$(add_plugin "$h" mp offmcp 1.0.0)
+printf '%s\n' '{"ghost":{"command":"ghost-server"}}' >"$off/.mcp.json"
+write_manifest "$h" "offmcp@mp" "$off"
+printf '%s\n' '{"mcpServers":{"jira":{"command":"uv","args":["run","jira"],"env":{"K":"v"}},"remote":{"type":"http","url":"https://x.example/mcp"}}}' \
+  >"$h/.claude.json"
+printf '%s\n' '{"enabledPlugins":{"offmcp@mp":false}}' >"$h/.claude/settings.json"
+mkdir -p "$h/.agents"
+printf '%s\n' '{"settings":{"toolPrefix":"short"},"mcpServers":{"mine":{"command":"keep"}}}' >"$h/.agents/mcp.json"
+out=$(run_sync "$h" --target pi --write-mcp)
+assert_eq "case61: pi mcp.json carries Claude servers and keeps the user's own" \
+  "jira,mine,remote" "$(jq -r '.mcpServers | keys | join(",")' "$h/.agents/mcp.json")"
+assert_eq "case61: stdio server kept in Claude shape" \
+  "uv" "$(jq -r '.mcpServers.jira.command' "$h/.agents/mcp.json")"
+assert_eq "case61: adapter settings preserved" \
+  "short" "$(jq -r '.settings.toolPrefix' "$h/.agents/mcp.json")"
+assert_contains "case61: missing adapter is reported" "pi-mcp-adapter is not in" "$out"
+mkdir -p "$h/.pi/agent"
+printf '%s\n' '{"packages":["npm:pi-mcp-adapter@2.20.1"]}' >"$h/.pi/agent/settings.json"
+trash "$h/.agents/mcp.json" 2>/dev/null || mv "$h/.agents/mcp.json" "$h/.agents/mcp.json.old"
+out=$(run_sync "$h" --target pi --write-mcp)
+assert_eq "case61: fresh file is created 0600 (env may hold tokens)" \
+  "600" "$(stat -f '%Lp' "$h/.agents/mcp.json" 2>/dev/null || stat -c '%a' "$h/.agents/mcp.json")"
+assert_eq "case61: disabled plugin's MCP server is not written" \
+  "null" "$(jq -r '.mcpServers.ghost' "$h/.agents/mcp.json")"
+case "$out" in
+  *"pi-mcp-adapter is not in"*) failures=$((failures + 1)); echo "FAIL: case61: no adapter warning once installed" ;;
+  *) pass_count=$((pass_count + 1)); echo "PASS: case61: no adapter warning once installed" ;;
+esac
+out=$(run_sync "$h" --target pi --mcp-snippet)
+assert_contains "case61: --mcp-snippet prints the pi block" "paste into $h/.agents/mcp.json" "$out"
+
 echo
 echo "$pass_count passed, $failures failed"
 [ "$failures" -eq 0 ] || exit 1

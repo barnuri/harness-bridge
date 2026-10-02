@@ -24,10 +24,10 @@ updated whenever harness support changes (see `CLAUDE.md`).
 | **Slash commands** (`commands/*.md`) | ✅ link → `command/` | ✅ link → `prompts/` | ✅ link → `~/.codex/prompts/` (deprecated surface, still loaded) | ✅ link → `~/.cursor/commands/` | — no custom command/prompt-file surface |
 | **Global instructions** (`CLAUDE.md` or bundle) | ✅ native `CLAUDE.md`; bundle append pointer via `~/.config/opencode/AGENTS.md` | ✅ native `AGENTS.md` pointer/link | ✅ native `AGENTS.md` pointer/link | 🟡 native `.mdc` rule(s), projects under `$HOME` only | ✅ native `copilot-instructions.md` |
 | **Project `CLAUDE.md`** | ✅ read natively | — | — opt-in via `project_doc_fallback_filenames` in `config.toml` | ✅ CLI reads it natively | ✅ CLI reads it natively (git root & cwd) |
-| **MCP servers** | ✅ `--write-mcp` → `opencode.jsonc` (translated) | — no MCP support | 🟡 `--mcp-snippet` prints TOML to paste | ✅ `--write-mcp` → `~/.cursor/mcp.json` (same schema as Claude) | ✅ `--write-mcp` → `~/.copilot/mcp-config.json` (translated) |
+| **MCP servers** | ✅ `--write-mcp` → `opencode.jsonc` (translated) | ✅ `--write-mcp` → `~/.agents/mcp.json` (same schema as Claude; needs the `pi-mcp-adapter` extension) | 🟡 `--mcp-snippet` prints TOML to paste | ✅ `--write-mcp` → `~/.cursor/mcp.json` (same schema as Claude) | ✅ `--write-mcp` → `~/.copilot/mcp-config.json` (translated) |
 | **Saved dynamic workflows** (plugin `workflows/*.js`, `~/.claude/workflows/`, `.claude/workflows/`) | — no Workflow runtime | — | — | — | — |
 | **Hooks / permissions** | — | — | — | — | — (own hooks system, different mechanism) |
-| **Coverage** | **8/12 (67%)** | **3/12 (25%)** | **3.5/12 (29%)** | **7.5/12 (63%)** | **8/12 (67%)** |
+| **Coverage** | **8/12 (67%)** | **4/12 (33%)** | **3.5/12 (29%)** | **7.5/12 (63%)** | **8/12 (67%)** |
 
 Coverage counts the 12 resource rows above: ✅ = 1, 🟡 (manual paste step) = 0.5, — = 0.
 No harness can reach 100% — Claude's dynamic-workflow runtime (`agent()`/`pipeline()`
@@ -162,6 +162,7 @@ global one, so it is linked to `~/.pi/agent/AGENTS.md`, `~/.codex/AGENTS.md`, an
 | `~/.claude/commands/*.md` | same four command/prompt dirs as plugin commands | opencode, pi, cursor, codex |
 | `<project>/.claude/agents/*.md` | `<project>/.opencode/agent/`, `<project>/.github/agents/` | opencode, copilot (cursor reads the source natively) |
 | `<project>/.claude/commands/*.md` | `<project>/.opencode/command/`, `<project>/.pi/prompts/`, `<project>/.cursor/commands/` | opencode, pi, cursor |
+| Claude MCP servers (`~/.claude.json`, settings, plugin `.mcp.json`) | `~/.agents/mcp.json` via `--write-mcp` | pi (through `pi-mcp-adapter`) |
 | instruction bundle `shared.md` + optional `append.md` | native global pointer files | opencode, pi, codex, cursor |
 | instruction bundle optional `copilot.md` + shared sources | `~/.copilot/copilot-instructions.md` | copilot |
 | instruction bundle `cursor.md` | `~/.cursor/rules/cursor-instructions.mdc` | cursor |
@@ -225,7 +226,12 @@ fail when Copilot tries to install from them.
    - **copilot CLI** — `~/.copilot/mcp-config.json` requires a `type` key (`local`/`http`/
      `sse`) and a `tools` array that Claude's shape doesn't have, so `--write-mcp` merges
      a translation (`tools` defaults to `["*"]`, everything allowed).
-   - **pi** — no MCP support.
+   - **pi** — no native MCP; the [`pi-mcp-adapter`](https://www.npmjs.com/package/pi-mcp-adapter)
+     extension (`pi install npm:pi-mcp-adapter`, use `@2.20.1` on pi < 0.84) reads the
+     tool-agnostic `~/.agents/mcp.json`, which uses Claude's own shape, so `--write-mcp`
+     merges the servers near-verbatim (file created 0600, env blocks can hold tokens). The
+     adapter exposes one `mcp` proxy tool (search / describe / call) rather than one pi tool
+     per MCP tool. A missing adapter is reported on every `--write-mcp` run.
 
 Not bridgeable at all: saved dynamic workflows (the `Workflow` runtime executing plugin
 `workflows/*.js` / `~/.claude/workflows/` scripts is Claude Code-only — linking the files
@@ -275,6 +281,14 @@ so it is machine-specific.
 
 - **Version pinning** — reads `installed_plugins.json`; the cache also holds superseded
   copies flagged `.orphaned_at`, and globbing it would ship dead code.
+- **Disabled plugins** — Claude keeps a disabled plugin installed and in
+  `installed_plugins.json`; only `enabledPlugins` in `~/.claude/settings.json` says it is
+  off. Those plugins are skipped (and their old links pruned), so no harness gets skills,
+  agents, commands or MCP servers Claude itself does not load. A plugin missing from
+  `enabledPlugins` (e.g. managed scope) counts as enabled.
+- **Empty placeholder files** — a zero-byte real file at a destination (say
+  `~/.codex/AGENTS.md`) is still left alone, but reported as `EMPTY` because it hides the
+  synced instructions; `--report` shows the same state for pi and codex.
 - **Directory marketplaces** — when a marketplace is a local directory, Claude reads it
   live while the cache lags behind, so the live path wins.
 - **Custom component paths** — a plugin may declare `"skills": "./.claude/skills/"` in
@@ -347,7 +361,7 @@ links, with the same test suite passing on macOS and Linux.
 ## Tests
 
 ```bash
-bash test/harness-bridge.test.sh   # 208 assertions, throwaway fixture HOME
+bash test/harness-bridge.test.sh   # 224 assertions, throwaway fixture HOME
 ```
 
 Every case runs against a temporary `HOME`; the suite never reads or writes the real

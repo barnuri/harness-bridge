@@ -351,6 +351,18 @@ resolve_path() {
   printf '%s/%s\n' "$dir" "$(basename "$path")"
 }
 
+# A harness config file may be a hand-made symlink into a dotfiles repo (for example a
+# <harness>-user-scope/ folder that git-tracks it). A rewrite must land in the file behind
+# the link and leave the link itself in place, so every write targets the resolved path.
+# Falls back to the path itself when it is not a link or the link cannot be resolved.
+write_target() {
+  if [ -L "$1" ]; then
+    resolve_path "$1" 2>/dev/null || printf '%s\n' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 # --- Verification report ----------------------------------------------------------------
 # Compares what Claude Code says it has against what each harness actually loads. Claude's
 # own CLI is the authority for the inventory (`claude plugin list/details`, `claude mcp
@@ -1230,8 +1242,16 @@ EOF
 while IFS="	" read -r kind src dst; do
   [ -n "$kind" ] || continue
   dst_dir=$(dirname "$dst")
+  # Where a shim is written. Normally dst itself; but when dst is a hand-made link onto a
+  # file that carries our own shim marker (the user moved the generated file into a
+  # dotfiles repo and linked it back), regenerate the file behind the link and keep the link.
+  out="$dst"
+  if is_shim_kind "$kind" && [ -L "$dst" ] && ! is_owned_link "$dst"; then
+    link_file=$(resolve_path "$dst" 2>/dev/null) || link_file=""
+    [ -n "$link_file" ] && is_own_shim "$link_file" && out="$link_file"
+  fi
 
-  if [ -L "$dst" ]; then
+  if [ -L "$dst" ] && [ "$out" = "$dst" ]; then
     if ! is_shim_kind "$kind" && [ "$(readlink "$dst" 2>/dev/null)" = "$src" ]; then
       unchanged=$((unchanged + 1))
       continue
@@ -1247,9 +1267,9 @@ while IFS="	" read -r kind src dst; do
         continue
       fi
     fi
-  elif [ -e "$dst" ]; then
+  elif [ -e "$out" ]; then
     # Our own regenerated shim may be overwritten; anything else is the user's content.
-    if ! is_own_shim "$dst"; then
+    if ! is_own_shim "$out"; then
       if [ "$force" -eq 1 ]; then
         if [ "$dry_run" -eq 1 ]; then
           forced="$forced
@@ -1277,7 +1297,7 @@ while IFS="	" read -r kind src dst; do
         continue
       fi
     fi
-    if is_shim_kind "$kind" && [ -e "$dst" ] && [ "$(render_shim "$kind" "$src")" = "$(cat "$dst")" ]; then
+    if is_shim_kind "$kind" && [ -e "$out" ] && [ "$(render_shim "$kind" "$src")" = "$(cat "$out")" ]; then
       unchanged=$((unchanged + 1))
       continue
     fi
@@ -1285,7 +1305,11 @@ while IFS="	" read -r kind src dst; do
 
   if [ "$dry_run" -eq 1 ]; then
     if is_shim_kind "$kind"; then
-      note "would write shim $kind: $dst (from $src)"
+      if [ "$out" = "$dst" ]; then
+        note "would write shim $kind: $dst (from $src)"
+      else
+        note "would write shim $kind: $dst -> $out (through your link, from $src)"
+      fi
     else
       note "would link $kind: $dst -> $src"
     fi
@@ -1300,9 +1324,11 @@ while IFS="	" read -r kind src dst; do
     # Replace a previous symlink for this destination — the raw Claude file is not
     # loadable there (opencode rejects the agent YAML; cursor ignores a rule with no
     # alwaysApply frontmatter).
-    [ -L "$dst" ] && rm -- "$dst" 2>/dev/null
-    if render_shim "$kind" "$src" >"$dst" 2>/dev/null; then
+    [ -L "$dst" ] && [ "$out" = "$dst" ] && rm -- "$dst" 2>/dev/null
+    if render_shim "$kind" "$src" >"$out" 2>/dev/null; then
       shimmed=$((shimmed + 1))
+      [ "$out" = "$dst" ] || shims="$shims
+  $dst -> $out (written through your link; the link is kept)"
       if [ "$kind" = "cursor-rule" ]; then
         shims="$shims
   $dst (from $src) — alwaysApply frontmatter added; points at the global instruction sources, no copy"
@@ -1619,6 +1645,7 @@ elif [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
       echo "  $cursor_mcp is not valid JSON — not rewriting it. Use --mcp-snippet and paste by hand."
     else
       mkdir -p "$cursor_dir"
+      cursor_mcp=$(write_target "$cursor_mcp")
       tmp_cursor="$cursor_mcp.tmp.$$"
       if jq --argjson add "$mcp_merged" '. + {mcpServers: ((.mcpServers // {}) + $add)}' \
            "$cursor_mcp" 2>/dev/null >"$tmp_cursor" ||
@@ -1641,6 +1668,7 @@ elif [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
       echo "  $pi_mcp_file is not valid JSON — not rewriting it. Use --mcp-snippet and paste by hand."
     else
       mkdir -p "$(dirname "$pi_mcp_file")"
+      pi_mcp_file=$(write_target "$pi_mcp_file")
       tmp_pi="$pi_mcp_file.tmp.$$"
       (umask 077
        jq --argjson add "$mcp_merged" '. + {mcpServers: ((.mcpServers // {}) + $add)}' \
@@ -1668,6 +1696,7 @@ elif [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
       echo "  $copilot_mcp is not valid JSON — not rewriting it. Use --mcp-snippet and paste by hand."
     else
       mkdir -p "$copilot_dir"
+      copilot_mcp=$(write_target "$copilot_mcp")
       tmp_copilot="$copilot_mcp.tmp.$$"
       if jq --argjson add "$mcp_for_copilot" '. + {mcpServers: ((.mcpServers // {}) + $add)}' \
            "$copilot_mcp" 2>/dev/null >"$tmp_copilot" ||
@@ -1692,6 +1721,7 @@ if [ -n "$mcp_translated" ] && [ "$write_mcp" -eq 1 ]; then
     echo "  Re-run with --mcp-snippet and paste the block by hand."
   else
     mkdir -p "$opencode_dir"
+    oc_config=$(write_target "$oc_config")
     tmp_cfg="$oc_config.tmp.$$"
     if jq --argjson mcp "$mcp_translated" \
          '. + {mcp: ((.mcp // {}) + $mcp)}' \
@@ -1834,7 +1864,8 @@ PLUGINLIST
     echo "  could not create $copilot_dir — Copilot plugins not imported"
     return 0
   }
-  tmp_settings=$(mktemp "$copilot_dir/.harness-bridge-settings.XXXXXX") || {
+  copilot_settings=$(write_target "$copilot_settings")
+  tmp_settings=$(mktemp "$(dirname "$copilot_settings")/.harness-bridge-settings.XXXXXX") || {
     echo "  could not create a temporary settings file — Copilot plugins not imported"
     return 0
   }

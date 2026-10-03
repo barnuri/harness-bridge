@@ -1256,6 +1256,89 @@ esac
 out=$(run_sync "$h" --target pi --mcp-snippet)
 assert_contains "case61: --mcp-snippet prints the pi block" "paste into $h/.agents/mcp.json" "$out"
 
+# --- Case 62: a generated pointer the user moved into a dotfiles repo and linked back
+# (e.g. ~/.pi/agent/AGENTS.md -> <repo>/pi-user-scope/AGENTS.md) is regenerated *through*
+# the link: the link survives, the repo file gets the fresh content. A hand-made link onto
+# a file without the shim marker is still the user's and stays untouched.
+h=$(new_home)
+bundle=$(add_instruction_bundle "$h")
+write_manifest "$h"
+run_sync "$h" >/dev/null
+fresh=$(cat "$h/.pi/agent/AGENTS.md")
+mkdir -p "$h/dotfiles/pi-user-scope" "$h/dotfiles/codex-user-scope"
+mv "$h/.pi/agent/AGENTS.md" "$h/dotfiles/pi-user-scope/AGENTS.md"
+ln -s ../../dotfiles/pi-user-scope/AGENTS.md "$h/.pi/agent/AGENTS.md"
+# Make the moved shim stale (marker line kept) so the run has to regenerate it.
+{ head -1 "$h/dotfiles/pi-user-scope/AGENTS.md"; printf 'stale body\n'; } >"$h/stale.tmp"
+cat "$h/stale.tmp" >"$h/dotfiles/pi-user-scope/AGENTS.md"
+printf 'my own codex rules\n' >"$h/dotfiles/codex-user-scope/AGENTS.md"
+mv "$h/.codex/AGENTS.md" "$h/codex-agents.old"
+ln -s ../dotfiles/codex-user-scope/AGENTS.md "$h/.codex/AGENTS.md"
+out=$(run_sync "$h")
+assert_link_to "case62: pi AGENTS.md link into the dotfiles repo is kept" \
+  "$h/.pi/agent/AGENTS.md" "../../dotfiles/pi-user-scope/AGENTS.md"
+assert_eq "case62: the repo file is regenerated through the link" \
+  "$fresh" "$(cat "$h/dotfiles/pi-user-scope/AGENTS.md")"
+assert_contains "case62: write-through is reported" "written through your link" "$out"
+assert_eq "case62: hand-made link onto a non-shim file is left alone" \
+  "my own codex rules" "$(cat "$h/dotfiles/codex-user-scope/AGENTS.md")"
+assert_link_to "case62: that hand-made link itself is kept" \
+  "$h/.codex/AGENTS.md" "../dotfiles/codex-user-scope/AGENTS.md"
+assert_contains "case62: the non-shim link is reported as a conflict" \
+  "$h/.codex/AGENTS.md (existing symlink not created by this script — left alone)" "$out"
+out=$(run_sync "$h" --dry-run)
+assert_eq "case62: an up-to-date linked shim is not rewritten again" \
+  "" "$(printf '%s\n' "$out" | grep "would write shim global-instructions: $h/.pi/agent/AGENTS.md" || true)"
+
+# --- Case 63: --write-mcp and --write-plugins rewrite config files *through* a symlink
+# into a dotfiles repo instead of replacing the link with a regular file.
+h=$(new_home)
+p=$(add_plugin "$h" mp demo 1.0.0)
+add_plugin_manifest "$p" demo
+write_manifest "$h" "demo@mp" "$p"
+mkdir -p "$h/.claude/plugins/marketplaces/mp"
+jq -n --arg path "$h/.claude/plugins/marketplaces/mp" \
+  '{"mp":{"source":{"source":"directory","path":$path}}}' \
+  >"$h/.claude/plugins/known_marketplaces.json"
+printf '%s\n' '{"mcpServers":{"srv":{"command":"run-it"}}}' >"$h/.claude.json"
+repo="$h/dotfiles"
+mkdir -p "$repo" "$h/.config/opencode" "$h/.cursor" "$h/.copilot" "$h/.agents"
+printf '%s\n' '{"$schema":"https://opencode.ai/config.json"}' >"$repo/opencode.jsonc"
+printf '%s\n' '{"mcpServers":{}}' >"$repo/cursor-mcp.json"
+printf '%s\n' '{"mcpServers":{}}' >"$repo/copilot-mcp.json"
+printf '%s\n' '{"mcpServers":{}}' >"$repo/agents-mcp.json"
+printf '%s\n' '{"theme":"dark"}' >"$repo/copilot-settings.json"
+ln -s "$repo/opencode.jsonc" "$h/.config/opencode/opencode.jsonc"
+ln -s ../dotfiles/cursor-mcp.json "$h/.cursor/mcp.json"
+ln -s ../dotfiles/copilot-mcp.json "$h/.copilot/mcp-config.json"
+ln -s ../dotfiles/agents-mcp.json "$h/.agents/mcp.json"
+ln -s ../dotfiles/copilot-settings.json "$h/.copilot/settings.json"
+run_sync "$h" --write-mcp --write-plugins >/dev/null
+for pair in ".config/opencode/opencode.jsonc:$repo/opencode.jsonc" \
+            ".cursor/mcp.json:../dotfiles/cursor-mcp.json" \
+            ".copilot/mcp-config.json:../dotfiles/copilot-mcp.json" \
+            ".agents/mcp.json:../dotfiles/agents-mcp.json" \
+            ".copilot/settings.json:../dotfiles/copilot-settings.json"; do
+  assert_link_to "case63: $(printf '%s' "$pair" | cut -d: -f1) stays a symlink" \
+    "$h/$(printf '%s' "$pair" | cut -d: -f1)" "$(printf '%s' "$pair" | cut -d: -f2)"
+done
+assert_eq "case63: opencode server written into the repo file" \
+  '["run-it"]' "$(jq -c '.mcp.srv.command' "$repo/opencode.jsonc")"
+assert_eq "case63: cursor server written into the repo file" \
+  "run-it" "$(jq -r '.mcpServers.srv.command' "$repo/cursor-mcp.json")"
+assert_eq "case63: copilot server written into the repo file" \
+  "local" "$(jq -r '.mcpServers.srv.type' "$repo/copilot-mcp.json")"
+assert_eq "case63: pi adapter server written into the repo file" \
+  "run-it" "$(jq -r '.mcpServers.srv.command' "$repo/agents-mcp.json")"
+assert_eq "case63: pi adapter file stays 0600 behind the link" \
+  "600" "$(stat -f '%Lp' "$repo/agents-mcp.json" 2>/dev/null || stat -c '%a' "$repo/agents-mcp.json")"
+assert_eq "case63: copilot plugin settings written into the repo file" \
+  "true" "$(jq -r '.enabledPlugins["demo@mp"]' "$repo/copilot-settings.json")"
+assert_eq "case63: existing copilot setting preserved behind the link" \
+  "dark" "$(jq -r '.theme' "$repo/copilot-settings.json")"
+assert_eq "case63: no temp files left beside the repo files" \
+  "0" "$(ls -A "$repo" | grep -c -E 'tmp|harness-bridge-settings' || true)"
+
 echo
 echo "$pass_count passed, $failures failed"
 [ "$failures" -eq 0 ] || exit 1

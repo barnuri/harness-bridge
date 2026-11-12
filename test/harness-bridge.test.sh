@@ -606,6 +606,12 @@ assert_contains "case21: second tool kept" "  Read: true" "$(cat "$shim")"
 assert_contains "case21: body preserved" "Body stays intact." "$(cat "$shim")"
 assert_contains "case21: shim names its source" "$h/.claude/agents/listy.md" "$(cat "$shim")"
 assert_contains "case21: shim reported" "compatibility shims" "$out"
+assert_contains "case21: shim marks the agent a subagent" "mode: subagent" "$(cat "$shim")"
+printf -- '---\nname: moded\ndescription: names its mode\nmode: primary\ntools:\n  - Bash\n---\nBody.\n' \
+  >"$h/.claude/agents/moded.md"
+run_sync "$h" >/dev/null
+assert_eq "case21: a source mode is kept, not doubled" "1" \
+  "$(grep -c '^mode:' "$h/.config/opencode/agent/moded.md")"
 assert_eq "case21: source file untouched" "  - Bash" \
   "$(grep -m1 -- '- Bash' "$h/.claude/agents/listy.md")"
 

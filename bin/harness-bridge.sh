@@ -151,8 +151,15 @@
 #                        harness-specific files such as copilot.md or cursor.md
 #   HARNESS_BRIDGE_ENV_FILE
 #                        optional dotenv file containing persistent bridge options
+#   HARNESS_BRIDGE_ENABLE
+#                        the script is disabled by default; set to 1 to run it
 
 set -u
+
+if [ "${HARNESS_BRIDGE_ENABLE:-0}" != 1 ]; then
+  printf 'harness-bridge is disabled. Set HARNESS_BRIDGE_ENABLE=1 to run it.\n' >&2
+  exit 1
+fi
 
 die() {
   printf 'error: %s\n' "$1" >&2
